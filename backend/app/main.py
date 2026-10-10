@@ -13,7 +13,7 @@ from app.api.exception_handlers import (
     app_error_handler,
     unhandled_exception_handler,
 )
-from app.api.v1.routers import admin, auth, events, health, jobs, metrics, search
+from app.api.v1.routers import admin, auth, events, health, jobs, metrics, search, shelves
 from app.config import get_settings
 from app.container import build_container
 from app.domain.exceptions import AppError
@@ -24,7 +24,9 @@ from app.middleware.metrics import MetricsMiddleware
 
 async def safe_validation_error(request: Request, exc: RequestValidationError) -> Response:
     # FastAPI's default 422 response echoes invalid inputs, including submitted keys.
-    if request.url.path.startswith(("/api/v1/admin", "/api/v1/auth", "/api/v1/search")):
+    if request.url.path.startswith(
+        ("/api/v1/admin", "/api/v1/auth", "/api/v1/search", "/api/v1/shelves")
+    ):
         return JSONResponse(
             status_code=422,
             content={
@@ -72,6 +74,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(metrics.router)
     app.include_router(search.router)
+    app.include_router(shelves.router)
 
     app.add_exception_handler(RequestValidationError, safe_validation_error)  # type: ignore[arg-type]
     app.add_exception_handler(AppError, app_error_handler)  # type: ignore[arg-type]

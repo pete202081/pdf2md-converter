@@ -10,6 +10,7 @@ import type { LibrarySearchHit } from './api/types';
 import JobWorkspace from './components/JobWorkspace';
 import UploadPanel from './components/UploadPanel';
 import SettingsPage from './components/SettingsPage';
+import ShelvesPage from './components/ShelvesPage';
 import { useJobs } from './hooks/useJobs';
 import { useJobStream } from './hooks/useJobStream';
 import { isTerminal } from './lib/format';
@@ -18,14 +19,17 @@ export default function App() {
   const [auth, setAuth] = useState<AuthSession | null>(null);
   const [authError, setAuthError] = useState('');
   const [settingsVisible, setSettingsVisible] = useState(() => window.location.hash === '#settings');
+  const [shelvesVisible, setShelvesVisible] = useState(() => /^#(?:shelves|read\/)/.test(window.location.hash));
   useEffect(() => {
     let active = true;
     const sync = () => { setSettingsVisible(window.location.hash === '#settings');
+      setShelvesVisible(/^#(?:shelves|read\/)/.test(window.location.hash));
       void getAuthSession().then(result => { if (active) { setAuth(result); setAuthError(''); } })
         .catch(cause => { if (active) setAuthError(cause instanceof Error ? cause.message : 'API offline'); }); };
     sync(); window.addEventListener('hashchange', sync); window.addEventListener('pdf2md-auth-changed', sync);
     return () => { active = false; window.removeEventListener('hashchange', sync); window.removeEventListener('pdf2md-auth-changed', sync); };
   }, []);
+  if (shelvesVisible) return <ShelvesPage auth={auth} />;
   if (auth?.authenticated) return <WorkspaceApp auth={auth} onSignOut={() => {
     void signOut().then(() => setAuth({ authenticated: false, username: null, role: null, csrf_token: null }))
       .catch(() => setAuth({ authenticated: false, username: null, role: null, csrf_token: null }));
@@ -82,6 +86,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     <header className="site-header">
       <a className="brand" href="/" aria-label="Folio home"><span className="brand-icon"><BookOpen size={21} strokeWidth={1.8} /></span><span className="brand-name">folio<span className="brand-period">.</span></span><span className="brand-divider" /><span className="brand-subtitle">PDF TO MARKDOWN STUDIO</span></a>
       <nav className={`top-nav ${menuOpen ? 'top-nav-open' : ''}`} aria-label="Main navigation">
+        <a href="#shelves" onClick={() => setMenuOpen(false)}>Bookshelves</a>
         <a className={page === 'workspace' ? 'nav-active' : ''} href="#workspace" onClick={() => { setPage('workspace'); setMenuOpen(false); }}>Workspace</a>
         {auth.role === 'ADMIN' && <a className={page === 'settings' ? 'nav-active' : ''} href="#settings" onClick={() => { setPage('settings'); setMenuOpen(false); }}>Settings</a>}
         <a href="#how-it-works" onClick={() => setMenuOpen(false)}>How it works</a>

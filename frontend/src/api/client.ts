@@ -1,4 +1,4 @@
-import type { ApiErrorBody, DiagramReviewItem, EditableChapter, Job, JobDetail, QualitySummary, LibrarySearchResponse } from './types';
+import type { ApiErrorBody, DiagramReviewItem, EditableChapter, Job, JobDetail, QualitySummary, LibrarySearchResponse, ShelfBook, ShelfBookDetail, ReadingProgress } from './types';
 
 export const JOBS_URL = '/api/v1/jobs';
 let csrfToken: string | null = null;
@@ -199,4 +199,51 @@ export function decideDiagramReview(
     { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
       body: JSON.stringify({ decision, ...(mermaidCode !== undefined ? { mermaid_code: mermaidCode } : {}) }) },
   );
+}
+
+// Bookshelves: public reads never require a session; writes use the shared CSRF request.
+const SHELVES = '/api/v1/shelves';
+export function publicShelf(page = 1): Promise<{ books: ShelfBook[]; page: number }> {
+  return request(`${SHELVES}/public?page=${page}`);
+}
+export function privateShelf(): Promise<ShelfBook[]> { return request(`${SHELVES}/mine`); }
+export function shelfEligibleJobs(): Promise<{ id: string; filename: string }[]> { return request(`${SHELVES}/eligible-jobs`); }
+export function shelfDetail(id: string, scope: 'public' | 'mine'): Promise<ShelfBookDetail> {
+  return request(`${SHELVES}/${scope}/${encodeURIComponent(id)}`);
+}
+export function shelfChapterUrl(id: string, chapter: number, scope: 'public' | 'mine'): string {
+  return `${SHELVES}/${scope}/${encodeURIComponent(id)}/chapters/${chapter}`;
+}
+export function shelfAssetUrl(id: string, name: string, scope: 'public' | 'mine'): string {
+  return `${SHELVES}/${scope}/${encodeURIComponent(id)}/assets/${encodeURIComponent(name)}`;
+}
+export async function shelfMarkdown(id: string, chapter: number, scope: 'public' | 'mine', signal?: AbortSignal): Promise<string> {
+  const response = await fetch(shelfChapterUrl(id, chapter, scope), { signal });
+  if (!response.ok) throw new ApiError('Chapter unavailable', response.status, 'CHAPTER_UNAVAILABLE');
+  return response.text();
+}
+export function addConvertedToShelf(jobId: string): Promise<ShelfBookDetail> {
+  return request(`${SHELVES}/from-job/${encodeURIComponent(jobId)}`, { method: 'POST' });
+}
+export async function importShelfBook(file: File, title: string): Promise<ShelfBookDetail> {
+  const body = new FormData(); body.append('file', file);
+  if (file.name.toLowerCase().endsWith('.md')) body.append('title', title);
+  return request(`${SHELVES}/import`, { method: 'POST', body });
+}
+export function updateShelfBook(id: string, changes: Partial<Pick<ShelfBook, 'visibility' | 'title' | 'author' | 'description'>>): Promise<ShelfBookDetail> {
+  return request(`${SHELVES}/mine/${encodeURIComponent(id)}`, { method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) });
+}
+export function removeShelfBook(id: string): Promise<void> {
+  return request(`${SHELVES}/mine/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+export function readProgress(id: string): Promise<ReadingProgress> {
+  return request(`${SHELVES}/reading/${encodeURIComponent(id)}`);
+}
+export function saveReadProgress(id: string, chapter_id: number, completed?: boolean): Promise<ReadingProgress> {
+  return request(`${SHELVES}/reading/${encodeURIComponent(id)}`, { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chapter_id, ...(completed === undefined ? {} : { completed }) }) });
+}
+export function resetReadProgress(id: string): Promise<void> {
+  return request(`${SHELVES}/reading/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

@@ -25,7 +25,7 @@ export default function AuthGate({ onAuthenticated, error: connectionError }: {
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Request failed.'); }
     finally { setBusy(false); }
   }
-  return <div className="app-shell"><header className="site-header"><span className="brand"><span className="brand-icon"><BookOpen size={21} /></span><span className="brand-name">folio<span className="brand-period">.</span></span></span><a href="#settings">Administrator setup / settings</a></header>
+  return <div className="app-shell"><header className="site-header"><span className="brand"><span className="brand-icon"><BookOpen size={21} /></span><span className="brand-name">folio<span className="brand-period">.</span></span></span><nav style={{ display: "flex", gap: 18 }}><a href="#shelves">Browse public books</a><a href="#settings">Administrator setup / settings</a></nav></header>
     <main className="main-content" style={{ maxWidth: 520, margin: '5rem auto' }}>
       <div className="settings-card settings-auth">
         <LockKeyhole size={26} /><h1>{mode === 'login' ? 'Welcome back' : mode === 'signup' ? 'Request an account' : 'Reset your password'}</h1>

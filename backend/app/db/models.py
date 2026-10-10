@@ -252,3 +252,79 @@ class SearchDocument(Base):
     first_page: Mapped[int | None] = mapped_column(Integer)
     last_page: Mapped[int | None] = mapped_column(Integer)
     indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ShelfBook(Base):
+    """A shelf-owned immutable reading copy, independent of its source job."""
+
+    __tablename__ = "shelf_books"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    author: Mapped[str | None] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(String(1000))
+    source_kind: Mapped[str] = mapped_column(String(24))
+    visibility: Mapped[str] = mapped_column(String(8), default="PRIVATE", index=True)
+    storage_backend: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    chapters: Mapped[list[ShelfChapter]] = relationship(
+        back_populates="book",
+        cascade="all, delete-orphan",
+        order_by="ShelfChapter.order_index",
+        lazy="selectin",
+    )
+    assets: Mapped[list[ShelfAsset]] = relationship(
+        back_populates="book",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class ShelfChapter(Base):
+    __tablename__ = "shelf_chapters"
+    __table_args__ = (UniqueConstraint("book_id", "order_index"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    book_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("shelf_books.id", ondelete="CASCADE"), index=True
+    )
+    order_index: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(200))
+    relative_path: Mapped[str] = mapped_column(String(128))
+    book: Mapped[ShelfBook] = relationship(back_populates="chapters")
+
+
+class ShelfAsset(Base):
+    __tablename__ = "shelf_assets"
+    __table_args__ = (UniqueConstraint("book_id", "name"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    book_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("shelf_books.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(128))
+    media_type: Mapped[str] = mapped_column(String(40))
+    book: Mapped[ShelfBook] = relationship(back_populates="assets")
+
+
+class ReadingPosition(Base):
+    __tablename__ = "reading_positions"
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    book_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("shelf_books.id", ondelete="CASCADE"), primary_key=True
+    )
+    chapter_id: Mapped[int] = mapped_column(ForeignKey("shelf_chapters.id", ondelete="CASCADE"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ChapterCompletion(Base):
+    __tablename__ = "chapter_completions"
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    chapter_id: Mapped[int] = mapped_column(
+        ForeignKey("shelf_chapters.id", ondelete="CASCADE"), primary_key=True
+    )
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

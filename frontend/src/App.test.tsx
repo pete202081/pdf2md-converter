@@ -56,6 +56,20 @@ describe('dashboard wiring', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/jobs/job-other/chapters/4/preview', expect.anything());
   });
 
+  it('opens the public shelf as a guest without the private login gate', async () => {
+    window.location.hash = '#shelves';
+    const fetchMock = vi.fn().mockImplementation(async (input: string) => {
+      if (input === '/api/v1/auth/session') return { ok: true, status: 200, json: async () => ({ authenticated: false, username: null, role: null, csrf_token: null }) };
+      if (input === '/api/v1/shelves/public?page=1') return { ok: true, status: 200, json: async () => ({ books: [], page: 1 }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('heading', { name: /A shelf full of/i })).toBeInTheDocument());
+    expect(screen.queryByRole('heading', { name: 'Welcome back' })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('/shelves/mine'))).toBe(true);
+  });
+
   it('shows a useful offline state without pretending a job succeeded', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
     render(<App />);

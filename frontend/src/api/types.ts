@@ -95,3 +95,15 @@ export interface LibrarySearchHit {
   excerpt: string;
 }
 export interface LibrarySearchResponse { results: LibrarySearchHit[]; pending_books: number }
+
+export interface ShelfChapter { id: number; order_index: number; title: string }
+export interface ShelfBook {
+  id: string; title: string; author: string | null; description: string | null;
+  visibility: 'PRIVATE' | 'PUBLIC'; source_kind: 'MARKDOWN_IMPORT' | 'CONVERSION_SNAPSHOT';
+  chapter_count: number; created_at: string;
+}
+export interface ShelfBookDetail extends ShelfBook { chapters: ShelfChapter[] }
+export interface ReadingProgress {
+  last_chapter_id: number | null; completed_chapter_ids: number[];
+  resume_chapter_id: number | null; all_complete: boolean;
+}
