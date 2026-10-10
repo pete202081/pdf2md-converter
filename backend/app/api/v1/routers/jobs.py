@@ -29,6 +29,7 @@ from app.domain.exceptions import ConflictError, NotFoundError, StorageError
 from app.repositories.base import IJobRepository
 from app.services.diagram_review import DiagramReviewService
 from app.services.minio_diagram_review import MinioDiagramReviewService
+from app.services.quality_review import QualityReviewService, content_hash
 from app.services.rate_limits import RateLimiter
 from app.services.upload_service import UploadService
 
@@ -280,3 +281,153 @@ async def decide_diagram_review(
             job_id, item_id, body.decision, body.mermaid_code
         )
     return ReviewItemOut.model_validate(item)
+
+
+class ChapterEditIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    markdown: str = Field(min_length=1, max_length=2 * 1024 * 1024)
+
+
+class UndoEditIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+def quality_service(
+    session: AsyncSession, file_store: IFileStore, container: Container
+) -> QualityReviewService:
+    return QualityReviewService(session, file_store, getattr(container, "object_store", None))
+
+
+@router.get("/{job_id}/quality")
+async def quality_summary(
+    job_id: str,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> dict[str, object]:
+    job = check_owner(await job_repository.get(job_id), user)
+    return await quality_service(session, file_store, container).summary(job)
+
+
+@router.put("/{job_id}/quality/pages/{page_number}")
+async def mark_quality_page(
+    job_id: str,
+    page_number: int,
+    request: Request,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> dict[str, object]:
+    job = check_owner(await job_repository.get(job_id), user)
+    await RateLimiter(container.redis, container.settings).costly(request, "review", user.id)
+    return await quality_service(session, file_store, container).mark_page(
+        job, page_number, user.id
+    )
+
+
+@router.get("/{job_id}/quality/chapters/{order_index}/pages/{page_number}.png")
+async def source_page_image(
+    job_id: str,
+    order_index: int,
+    page_number: int,
+    request: Request,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> Response:
+    job = check_owner(await job_repository.get(job_id), user)
+    await RateLimiter(container.redis, container.settings).costly(request, "page", user.id)
+    image = await quality_service(session, file_store, container).page_image(
+        job, order_index, page_number
+    )
+    return Response(
+        content=image,
+        media_type="image/png",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/{job_id}/quality/chapters/{order_index}")
+async def edit_source(
+    job_id: str,
+    order_index: int,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> dict[str, str | bool]:
+    job = check_owner(await job_repository.get(job_id), user)
+    if job.status not in _FINISHED_STATES:
+        raise ConflictError("Only completed jobs can be edited")
+    chapter = next((c for c in job.chapters if c.order_index == order_index), None)
+    if not chapter or not chapter.md_path:
+        raise NotFoundError("Chapter is unavailable")
+    service = quality_service(session, file_store, container)
+    text = await service._text(job, chapter.md_path)
+    digest_value = content_hash(text)
+    from sqlalchemy import select
+
+    from app.db.models import ChapterEdit
+
+    last_edit = await session.scalar(
+        select(ChapterEdit)
+        .where(
+            ChapterEdit.job_id == job_id,
+            ChapterEdit.chapter_order == order_index,
+            ChapterEdit.undone_at.is_(None),
+        )
+        .order_by(ChapterEdit.id.desc())
+        .limit(1)
+    )
+    return {
+        "markdown": text,
+        "hash": digest_value,
+        "can_undo": bool(last_edit and last_edit.new_hash == digest_value),
+    }
+
+
+@router.put("/{job_id}/quality/chapters/{order_index}")
+async def edit_quality_chapter(
+    job_id: str,
+    order_index: int,
+    body: ChapterEditIn,
+    request: Request,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> dict[str, str]:
+    check_owner(await job_repository.get(job_id), user)
+    await RateLimiter(container.redis, container.settings).costly(request, "review", user.id)
+    return await quality_service(session, file_store, container).edit(
+        job_id, order_index, body.expected_hash, body.markdown, user.id
+    )
+
+
+@router.post("/{job_id}/quality/chapters/{order_index}/undo")
+async def undo_quality_chapter(
+    job_id: str,
+    order_index: int,
+    body: UndoEditIn,
+    request: Request,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> dict[str, str]:
+    check_owner(await job_repository.get(job_id), user)
+    await RateLimiter(container.redis, container.settings).costly(request, "review", user.id)
+    return await quality_service(session, file_store, container).undo(
+        job_id, order_index, body.expected_hash, user.id
+    )

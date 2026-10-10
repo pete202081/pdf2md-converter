@@ -18,6 +18,7 @@ from app.db.models import DiagramReviewItem, Job, utcnow
 from app.domain.enums import JobStatus
 from app.domain.exceptions import ConflictError, NotFoundError, ProviderError, ValidationError
 from app.services.mermaid_validation import validate_mermaid
+from app.services.revision_archive import write_revision
 
 Decision = Literal["ACCEPTED_IMAGE", "EDITED_MERMAID"]
 _ASSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|webp|gif|bmp|tiff?|jpx|jp2)$", re.I)
@@ -45,27 +46,6 @@ def replace_block(markdown: str, item: DiagramReviewItem, replacement: str) -> s
     if first >= last:
         raise ConflictError("The diagram anchor is malformed; no files changed")
     return markdown[:first] + replacement + markdown[last:]
-
-
-def _write_revision(
-    source: Path,
-    destination: Path,
-    chapter_path: str,
-    chapter_text: str,
-    manifest: dict[str, object],
-) -> None:
-    with zipfile.ZipFile(source) as existing, zipfile.ZipFile(destination, "w") as updated:
-        names = set(existing.namelist())
-        if chapter_path not in names or "chapters.json" not in names:
-            raise ConflictError("ZIP is missing the expected chapter or manifest")
-        for member in existing.infolist():
-            if member.filename == chapter_path:
-                updated.writestr(member, chapter_text.encode("utf-8"))
-            elif member.filename == "chapters.json":
-                updated.writestr(member, json.dumps(manifest, indent=2).encode("utf-8"))
-            else:
-                with existing.open(member) as reader, updated.open(member, "w") as writer:
-                    shutil.copyfileobj(reader, writer, 1024 * 1024)
 
 
 class DiagramReviewService:
@@ -169,7 +149,7 @@ class DiagramReviewService:
                 job_id, f".revisions/{version}/{member}", updated_text
             )
             await asyncio.to_thread(
-                _write_revision, source, Path(new_zip), member, updated_text, manifest
+                write_revision, source, Path(new_zip), member, updated_text, manifest
             )
             chapter.md_path = new_chapter
             chapter.mermaid_count += count_delta

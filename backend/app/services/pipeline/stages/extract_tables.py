@@ -43,6 +43,13 @@ class ExtractTablesStage(BasePipelineStage):
         tables_by_page: dict[int, list[ContentBlock]] = {}
         for table in found:
             tables_by_page.setdefault(table.page, []).append(table)
+            rows = [row.strip("| ").split("|") for row in table.text.splitlines()[2:]]
+            cells = [cell.strip() for row in rows for cell in row]
+            if len(cells) >= 4 and sum(not cell for cell in cells) * 2 >= len(cells):
+                hints = ctx.data.setdefault("quality_hints", {})
+                hints.setdefault(table.page + 1, {})["SPARSE_TABLE"] = (
+                    "Extracted table has many empty cells; compare with the source"
+                )
         # Remove text blocks physically inside detected tables; otherwise each
         # cell would appear twice (once as flattened PDF text, once in Markdown).
         text_kinds = {PARAGRAPH, HEADING, LIST_ITEM, CODE}

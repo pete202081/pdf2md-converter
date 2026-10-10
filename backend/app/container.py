@@ -41,6 +41,7 @@ from app.services.pipeline.stages.extract_tables import ExtractTablesStage
 from app.services.pipeline.stages.extract_text import ExtractTextStage
 from app.services.pipeline.stages.package_output import PackageOutputStage
 from app.services.pipeline.stages.publish_objects import PublishObjectsStage
+from app.services.pipeline.stages.quality_hints import QualityHintsStage
 from app.services.pipeline.stages.validate_upload import ValidateUploadStage
 from app.services.progress_service import ProgressService
 from app.services.text_extractor import TextExtractor
@@ -124,6 +125,7 @@ class Container:
                 self.chapter_repository(session),
                 review_repository=self.diagram_review_repository(session),
             ),
+            QualityHintsStage(progress, session),
             PackageOutputStage(progress),
         ]
         if self.object_store and upload_path_override:

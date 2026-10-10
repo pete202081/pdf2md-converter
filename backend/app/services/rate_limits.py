@@ -55,6 +55,7 @@ class RateLimiter:
         limit = {
             "upload": settings.upload_limit_hour,
             "review": settings.review_limit_hour,
+            "page": settings.page_view_limit_hour,
             "provider": settings.provider_check_limit_hour,
         }[category]
         await self.check(f"{category}:user", str(user_id), limit=limit, window=3600)

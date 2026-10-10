@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     pending_account_cap: int = 200
     upload_limit_hour: int = 15
     review_limit_hour: int = 60
+    page_view_limit_hour: int = 300
     provider_check_limit_hour: int = 8
     sse_limit: int = 4
 

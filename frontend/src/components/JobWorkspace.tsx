@@ -9,6 +9,7 @@ import type { Job, JobDetail, ProgressEvent } from '../api/types';
 import { canDownload, formatDate, isTerminal, prettyStage, statusLabel } from '../lib/format';
 import MarkdownPreview from './MarkdownPreview';
 import DiagramReviewPanel from './DiagramReviewPanel';
+import QualityReviewPanel from './QualityReviewPanel';
 
 interface Props {
   job: Job | null;
@@ -27,13 +28,14 @@ export default function JobWorkspace({ job, detail, events, streamState, onDelet
   const [mode, setMode] = useState<'rendered' | 'source'>('rendered');
   const [copied, setCopied] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [qualityOpen, setQualityOpen] = useState(false);
   const [previewRevision, setPreviewRevision] = useState(0);
   const chapters = [...(detail?.chapters ?? [])].sort((a, b) => a.order_index - b.order_index);
   const selectedChapter = chapters.find(chapter => chapter.order_index === order);
   const latest = events.at(-1);
   const percent = isTerminal(job?.status ?? 'QUEUED') ? 100 : latest?.percent ?? (job?.status === 'RUNNING' ? 8 : 0);
 
-  useEffect(() => { setOrder(null); setMarkdown(''); setMode('rendered'); setReviewOpen(false); }, [job?.id]);
+  useEffect(() => { setOrder(null); setMarkdown(''); setMode('rendered'); setReviewOpen(false); setQualityOpen(false); }, [job?.id]);
   useEffect(() => {
     if (chapters.length && !chapters.some(chapter => chapter.order_index === order)) {
       setOrder(chapters[0].order_index);
@@ -100,9 +102,13 @@ export default function JobWorkspace({ job, detail, events, streamState, onDelet
     {job.status === 'PARTIAL' && reviewOpen && <DiagramReviewPanel jobId={job.id} onSelectChapter={setOrder} onChanged={() => { setPreviewRevision(value => value + 1); onRefresh(); }} />}
     {job.status === 'FAILED' && <div className="notice notice-red"><AlertCircle size={17} /><span>{job.error || 'The conversion did not finish. Check the stages below.'}</span></div>}
 
+    {qualityOpen && isTerminal(job.status) && job.status !== 'FAILED' && <QualityReviewPanel jobId={job.id} initialChapterOrder={order}
+      onChanged={() => { setPreviewRevision(value => value + 1); onRefresh(); }} />}
+
     <div className="workspace-toolbar">
       <div className="toolbar-label"><BookOpen size={17} /><span>THE BOOK</span><span className="toolbar-count">{chapters.length} CHAPTERS</span></div>
       <div className="toolbar-actions">
+        {canDownload(job.status) && <button className="secondary-button" type="button" onClick={() => setQualityOpen(!qualityOpen)}>{qualityOpen ? 'Hide quality review' : 'Review quality'}</button>}
         <button className="icon-button" onClick={onRefresh} title="Refresh job" aria-label="Refresh job"><RefreshCw size={16} /></button>
         {isTerminal(job.status) && <button className="icon-button danger-hover" onClick={() => onDelete(job.id)} title="Delete job" aria-label="Delete job"><Trash2 size={16} /></button>}
         {canDownload(job.status) && <a className="download-button" href={downloadUrl(job.id)} download><ArrowDownToLine size={16} /> Download ZIP</a>}

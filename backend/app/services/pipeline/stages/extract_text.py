@@ -37,6 +37,12 @@ class ExtractTextStage(BasePipelineStage):
                         self._extractor.extract_page, document, page_number, body_size
                     )
                     blocks.extend(page_blocks)
+                    hints = ctx.data.setdefault("quality_hints", {})
+                    page_hints = hints.setdefault(page_number + 1, {})
+                    if not document[page_number].get_text().strip():
+                        page_hints["OCR_USED"] = "Scanned page: OCR fallback was used"
+                    if sum(len(block.text.split()) for block in page_blocks) < 10:
+                        page_hints["LOW_TEXT"] = "Very little text was extracted; check this page"
                     done += 1
                     if done % 10 == 0 or done == total_pages:
                         percent = 15 + int(done / total_pages * 30)

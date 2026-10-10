@@ -68,3 +68,18 @@ export interface DiagramReviewItem {
   mermaid_code: string | null;
   reviewed_at: string | null;
 }
+
+export interface QualityFlag {
+  id: number;
+  page_number: number;
+  chapter_order: number;
+  code: string;
+  message: string;
+  reviewed_at: string | null;
+}
+export interface QualitySummary {
+  inventory_ready: boolean;
+  chapters: { order: number; source_pages: [number, number] | null }[];
+  flags: QualityFlag[];
+}
+export interface EditableChapter { markdown: string; hash: string; can_undo: boolean }

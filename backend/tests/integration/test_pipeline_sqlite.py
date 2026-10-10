@@ -21,7 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.adapters.storage.file_store import LocalFileStore
 from app.config import Settings
-from app.db.models import Base, Job
+from app.db.models import Base, Job, PageQualityFlag
 from app.domain.enums import JobStatus, StageStatus
 from app.repositories.chapter_repository import ChapterRepository
 from app.repositories.diagram_review_repository import DiagramReviewRepository
@@ -39,6 +39,7 @@ from app.services.pipeline.stages.extract_images import ExtractImagesStage
 from app.services.pipeline.stages.extract_tables import ExtractTablesStage
 from app.services.pipeline.stages.extract_text import ExtractTextStage
 from app.services.pipeline.stages.package_output import PackageOutputStage
+from app.services.pipeline.stages.quality_hints import QualityHintsStage
 from app.services.pipeline.stages.validate_upload import ValidateUploadStage
 from app.services.progress_service import ProgressService
 from app.services.text_extractor import TextExtractor
@@ -62,9 +63,15 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 def _build_stages(
-    progress, file_store, chapter_repository, ocr_engine, vlm_engine=None, review_repository=None
+    progress,
+    file_store,
+    chapter_repository,
+    ocr_engine,
+    vlm_engine=None,
+    review_repository=None,
+    quality_session=None,
 ):
-    return [
+    stages = [
         ValidateUploadStage(progress),
         DetectChaptersStage(progress),
         ExtractTextStage(progress, TextExtractor(ocr_engine)),
@@ -75,8 +82,11 @@ def _build_stages(
         AssembleChaptersStage(
             progress, file_store, chapter_repository, review_repository=review_repository
         ),
-        PackageOutputStage(progress),
     ]
+    if quality_session is not None:
+        stages.append(QualityHintsStage(progress, quality_session))
+    stages.append(PackageOutputStage(progress))
+    return stages
 
 
 async def test_full_pipeline_end_to_end(session: AsyncSession, tmp_path: Path) -> None:
@@ -102,7 +112,9 @@ async def test_full_pipeline_end_to_end(session: AsyncSession, tmp_path: Path) -
     )
 
     orchestrator = ConversionOrchestrator(
-        stages=_build_stages(progress, file_store, chapter_repository, ocr),
+        stages=_build_stages(
+            progress, file_store, chapter_repository, ocr, quality_session=session
+        ),
         job_repository=job_repository,
         stage_repository=stage_repository,
         file_store=file_store,
@@ -121,6 +133,13 @@ async def test_full_pipeline_end_to_end(session: AsyncSession, tmp_path: Path) -
     assert job.chapter_count == 2
     assert job.output_path is not None and job.output_path.endswith(".zip")
     assert job.error is None
+    assert job.quality_inventory_ready
+    from sqlalchemy import select
+
+    flags = (
+        await session.scalars(select(PageQualityFlag).where(PageQualityFlag.job_id == "job-1"))
+    ).all()
+    assert any(flag.page_number == 4 and flag.code == "OCR_USED" for flag in flags)
 
     # --- all stages succeeded ------------------------------------------------
     assert [stage.stage_name for stage in job.stages] == [
@@ -132,6 +151,7 @@ async def test_full_pipeline_end_to_end(session: AsyncSession, tmp_path: Path) -
         "classify_diagrams",
         "convert_mermaid",
         "assemble_chapters",
+        "quality_hints",
         "package_output",
     ]
     assert all(stage.status == StageStatus.SUCCEEDED for stage in job.stages)
@@ -345,7 +365,7 @@ async def test_mermaid_pipeline_success_or_image_fallback(
             raise OSError("simulated disk failure")
 
         with monkeypatch.context() as patch:
-            patch.setattr(review_module, "_write_revision", fail_zip)
+            patch.setattr(review_module, "write_revision", fail_zip)
             with pytest.raises(OSError, match="simulated disk failure"):
                 await review.decide(job_id, second.id, "EDITED_MERMAID", "flowchart TD\nA --> B")
         reloaded = await jobs.get(job_id)

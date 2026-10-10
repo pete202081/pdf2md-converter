@@ -1,4 +1,4 @@
-import type { ApiErrorBody, DiagramReviewItem, Job, JobDetail } from './types';
+import type { ApiErrorBody, DiagramReviewItem, EditableChapter, Job, JobDetail, QualitySummary } from './types';
 
 export const JOBS_URL = '/api/v1/jobs';
 let csrfToken: string | null = null;
@@ -88,6 +88,29 @@ export async function getChapterMarkdown(jobId: string, order: number, signal?: 
     throw new ApiError(body.message || 'Could not load chapter', response.status, body.error_code || 'HTTP_ERROR');
   }
   return response.text();
+}
+
+export function getQualitySummary(jobId: string): Promise<QualitySummary> {
+  return request<QualitySummary>(`${JOBS_URL}/${encodeURIComponent(jobId)}/quality`);
+}
+export function getEditableChapter(jobId: string, order: number): Promise<EditableChapter> {
+  return request<EditableChapter>(`${JOBS_URL}/${encodeURIComponent(jobId)}/quality/chapters/${order}`);
+}
+export function sourcePageUrl(jobId: string, order: number, page: number): string {
+  return `${JOBS_URL}/${encodeURIComponent(jobId)}/quality/chapters/${order}/pages/${page}.png`;
+}
+export function reviewQualityPage(jobId: string, page: number): Promise<QualitySummary> {
+  return request<QualitySummary>(`${JOBS_URL}/${encodeURIComponent(jobId)}/quality/pages/${page}`, { method: 'PUT' });
+}
+export function saveQualityChapter(jobId: string, order: number, expected_hash: string, markdown: string): Promise<{ hash: string; message: string }> {
+  return request(`${JOBS_URL}/${encodeURIComponent(jobId)}/quality/chapters/${order}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_hash, markdown }),
+  });
+}
+export function undoQualityChapter(jobId: string, order: number, expected_hash: string): Promise<{ hash: string; message: string }> {
+  return request(`${JOBS_URL}/${encodeURIComponent(jobId)}/quality/chapters/${order}/undo`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_hash }),
+  });
 }
 
 export function deleteJob(jobId: string): Promise<void> {

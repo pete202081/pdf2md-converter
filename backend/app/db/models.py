@@ -5,7 +5,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -39,6 +49,9 @@ class Job(Base):
         SAEnum(JobStatus, native_enum=False, length=16), default=JobStatus.QUEUED, index=True
     )
     page_count: Mapped[int] = mapped_column(Integer, default=0)
+    quality_inventory_ready: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
     chapter_count: Mapped[int] = mapped_column(Integer, default=0)
     output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -185,3 +198,36 @@ class DiagramReviewItem(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     job: Mapped[Job] = relationship(back_populates="review_items")
+
+
+class PageQualityFlag(Base):
+    """Auditable, rule-based warning for a source page of a NEW conversion."""
+
+    __tablename__ = "page_quality_flags"
+    __table_args__ = (UniqueConstraint("job_id", "page_number", "code"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    page_number: Mapped[int] = mapped_column(Integer)  # 1-based
+    chapter_order: Mapped[int] = mapped_column(Integer)
+    code: Mapped[str] = mapped_column(String(32))
+    message: Mapped[str] = mapped_column(String(200))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+
+class ChapterEdit(Base):
+    """The prior chapter pointer supports safe undo without storing text in SQL."""
+
+    __tablename__ = "chapter_edits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    chapter_order: Mapped[int] = mapped_column(Integer)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    old_md_path: Mapped[str] = mapped_column(Text)
+    old_hash: Mapped[str] = mapped_column(String(64))
+    new_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    undone_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))

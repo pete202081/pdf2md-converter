@@ -31,7 +31,7 @@ def test_existing_database_stamps_then_backfills_without_data_loss(tmp_path, mon
     main([])  # repeatable, no duplicate data
     with sqlite3.connect(db) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c49f2a10b36d",
+            "5d3c7f4102e9",
         )
         assert connection.execute("SELECT password_hash FROM users WHERE id=1").fetchone() == (
             "existing-argon2-hash",
@@ -40,6 +40,8 @@ def test_existing_database_stamps_then_backfills_without_data_loss(tmp_path, mon
             "SELECT owner_id,stored_path,output_path FROM jobs"
         ).fetchone() == (1, "/data/uploads/old.pdf", "/data/outputs/old.zip")
         assert connection.execute("SELECT storage_backend FROM jobs").fetchone() == ("local",)
+        assert connection.execute("SELECT quality_inventory_ready FROM jobs").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM page_quality_flags").fetchone() == (0,)
         assert connection.execute("SELECT decision FROM diagram_review_items").fetchone() == (
             "PENDING",
         )

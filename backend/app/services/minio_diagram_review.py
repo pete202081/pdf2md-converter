@@ -19,11 +19,11 @@ from app.domain.exceptions import ConflictError, NotFoundError, ProviderError, V
 from app.services.diagram_review import (
     _ASSET,
     Decision,
-    _write_revision,
     render_block,
     replace_block,
 )
 from app.services.mermaid_validation import validate_mermaid
+from app.services.revision_archive import write_revision
 
 
 class MinioDiagramReviewService:
@@ -102,7 +102,7 @@ class MinioDiagramReviewService:
                 delta = int(decision == "EDITED_MERMAID") - int(item.decision == "EDITED_MERMAID")
                 entry["mermaid_count"] = chapter.mermaid_count + delta
                 entry["word_count"] = len(updated.split())
-                await asyncio.to_thread(_write_revision, source, revised, member, updated, manifest)
+                await asyncio.to_thread(write_revision, source, revised, member, updated, manifest)
                 await asyncio.to_thread(revised_md.write_text, updated, encoding="utf-8")
                 new_md = await self.store.upload(revised_md, prefix + member)
                 new_zip = await self.store.upload(revised, prefix + "download.zip")
