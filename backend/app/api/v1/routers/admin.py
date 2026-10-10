@@ -1,15 +1,9 @@
-"""Single-administrator sessions and runtime settings. No key is sent to a browser."""
+"""Administrator setup, account approvals and settings; secrets stay server-side."""
 
-import hashlib
-import hmac
 import io
-import secrets
-from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import httpx
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,34 +15,38 @@ from app.adapters.vlm.http_providers import (
     OpenRouterVisionProvider,
 )
 from app.api.deps import get_container, get_session
+from app.api.v1.routers.auth import (
+    current_session,
+    digest,
+    expired,
+    new_session,
+    passwords,
+    require_admin,
+    set_cookie,
+    throttle,
+)
+from app.api.v1.routers.auth import (
+    login as user_login,
+)
 from app.config import Settings
 from app.container import Container
-from app.db.models import AdminAccount, AdminSession, BootstrapCode, utcnow
+from app.db.models import BootstrapCode, User, UserSession
 from app.domain.exceptions import ProviderError
+from app.services.rate_limits import RateLimiter
 from app.services.runtime_settings import RuntimeSettingsService
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
-passwords = PasswordHasher()
-COOKIE = "pdf2md_admin"
-
-
-def expired(value: datetime) -> bool:
-    return value.replace(tzinfo=UTC) <= utcnow() if value.tzinfo is None else value <= utcnow()
-
-
-def digest(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
 
 
 class SetupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    code: str
+    code: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=12, max_length=256)
 
 
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    password: str
+    password: str = Field(min_length=1, max_length=256)
 
 
 class SettingsUpdate(BaseModel):
@@ -70,79 +68,16 @@ class SettingsUpdate(BaseModel):
     anthropic_api_key: str | None = None
 
 
-async def _throttle(request: Request, container: Container) -> None:
-    # Redis is shared by replicas; 6 failures/15 min per IP. Also cap attempts
-    # even for nonexistent accounts to avoid an account-enumeration side channel.
-    address = request.headers.get("x-real-ip") or (
-        request.client.host if request.client else "unknown"
-    )
-    key = f"pdf2md:admin:attempts:{address}"
-    count = await container.redis.incr(key)
-    if count == 1:
-        await container.redis.expire(key, 900)
-    if count > 6:
-        raise HTTPException(429, "Too many attempts. Try again in 15 minutes.")
-
-
-def _cookie(response: Response, request: Request, token: str) -> None:
-    # Remove sessions issued by older builds (scoped only to /api/v1/admin).
-    response.delete_cookie(COOKIE, path="/api/v1/admin")
-    response.set_cookie(
-        COOKIE,
-        token,
-        max_age=12 * 3600,
-        httponly=True,
-        samesite="strict",
-        secure=request.headers.get("x-forwarded-proto", request.url.scheme) == "https",
-        path="/api/v1",
-    )
-
-
-async def _new_session(session: AsyncSession) -> tuple[str, str]:
-    token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    session.add(
-        AdminSession(
-            token_hash=digest(token), csrf_token=csrf, expires_at=utcnow() + timedelta(hours=12)
-        )
-    )
-    await session.commit()
-    return token, csrf
-
-
-async def _current(request: Request, session: AsyncSession) -> AdminSession | None:
-    token = request.cookies.get(COOKIE)
-    if not token:
-        return None
-    found = await session.get(AdminSession, digest(token))
-    return found if found and not expired(found.expires_at) else None
-
-
-async def require_admin(
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-) -> AdminSession:
-    found = await _current(request, session)
-    if not found:
-        raise HTTPException(401, "Administrator login required")
-    if request.method not in ("GET", "HEAD") and not hmac.compare_digest(
-        request.headers.get("x-csrf-token", ""), found.csrf_token
-    ):
-        raise HTTPException(403, "Invalid CSRF token")
-    return found
-
-
 @router.get("/session")
 async def session_status(
     request: Request, response: Response, session: AsyncSession = Depends(get_session)
 ) -> dict[str, object]:
-    admin = await session.get(AdminAccount, 1)
-    current = await _current(request, session)
-    if current and request.cookies.get(COOKIE):
-        _cookie(response, request, request.cookies[COOKIE])
+    admin = await session.get(User, 1)
+    current = await current_session(request, session)
     return {
-        "setup_required": admin is None,
-        "authenticated": current is not None,
-        "csrf_token": current.csrf_token if current else None,
+        "setup_required": admin is None or admin.status == "SETUP_REQUIRED",
+        "authenticated": current is not None and current[0].role == "ADMIN",
+        "csrf_token": current[1].csrf_token if current and current[0].role == "ADMIN" else None,
     }
 
 
@@ -154,22 +89,28 @@ async def setup(
     session: AsyncSession = Depends(get_session),
     container: Container = Depends(get_container),
 ) -> dict[str, object]:
-    await _throttle(request, container)
-    if await session.get(AdminAccount, 1):
+    await throttle(request, container, "setup", "admin")
+    admin = await session.get(User, 1)
+    if not admin or admin.status != "SETUP_REQUIRED":
         raise HTTPException(409, "Administrator already exists")
     code = await session.get(BootstrapCode, 1)
-    if (
-        not code
-        or expired(code.expires_at)
-        or not hmac.compare_digest(digest(body.code), code.token_hash)
-    ):
+    if not code or expired(code.expires_at) or digest(body.code) != code.token_hash:
         raise HTTPException(401, "Invalid or expired setup code")
-    session.add(AdminAccount(id=1, password_hash=passwords.hash(body.password)))
+    # Compare-and-swap: only one caller may complete setup.
+    from sqlalchemy import update
+
+    result = await session.execute(
+        update(User)
+        .where(User.id == 1, User.status == "SETUP_REQUIRED")
+        .values(password_hash=passwords.hash(body.password), status="ACTIVE")
+        .returning(User.id)
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(409, "Administrator already configured")
     await session.delete(code)
-    # In a multi-API deployment, a concurrent setup must not create a second admin.
     await session.commit()
-    token, csrf = await _new_session(session)
-    _cookie(response, request, token)
+    token, csrf = await new_session(session, admin)
+    set_cookie(response, request, token)
     return {"authenticated": True, "csrf_token": csrf}
 
 
@@ -181,33 +122,29 @@ async def login(
     session: AsyncSession = Depends(get_session),
     container: Container = Depends(get_container),
 ) -> dict[str, object]:
-    await _throttle(request, container)
-    admin = await session.get(AdminAccount, 1)
-    try:
-        if not admin or not passwords.verify(admin.password_hash, body.password):
-            raise HTTPException(401, "Invalid credentials")
-    except VerifyMismatchError as exc:
-        raise HTTPException(401, "Invalid credentials") from exc
-    token, csrf = await _new_session(session)
-    _cookie(response, request, token)
-    address = request.headers.get("x-real-ip") or (
-        request.client.host if request.client else "unknown"
+    # Preserve the original admin-only login endpoint for first-time setup UI.
+    from app.api.v1.routers.auth import LoginRequest as UserLoginRequest
+
+    result = await user_login(
+        UserLoginRequest(username="admin", password=body.password),
+        request,
+        response,
+        session,
+        container,
     )
-    await container.redis.delete(f"pdf2md:admin:attempts:{address}")
-    return {"authenticated": True, "csrf_token": csrf}
+    return result
 
 
 @router.post("/logout")
 async def logout(
     response: Response,
-    admin: AdminSession = Depends(require_admin),
+    request: Request,
+    admin: User = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, bool]:
-    await session.delete(admin)
-    await session.commit()
-    response.delete_cookie(COOKIE, path="/api/v1")
-    response.delete_cookie(COOKIE, path="/api/v1/admin")
-    return {"authenticated": False}
+    from app.api.v1.routers.auth import logout as user_logout
+
+    return await user_logout(response, request, admin, session)
 
 
 @router.get("/settings", dependencies=[Depends(require_admin)])
@@ -243,10 +180,13 @@ class ProviderCheck(BaseModel):
 @router.post("/settings/check", dependencies=[Depends(require_admin)])
 async def check_provider(
     body: ProviderCheck,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     container: Container = Depends(get_container),
+    admin: User = Depends(require_admin),
 ) -> dict[str, object]:
     """Ollama tags are free; cloud checks explicitly require consent and can be billed."""
+    await RateLimiter(container.redis, container.settings).costly(request, "provider", admin.id)
     settings: Settings = await RuntimeSettingsService(session, container.settings).resolve()
     if body.provider != "ollama":
         if not body.acknowledge_cloud_cost:
@@ -313,3 +253,78 @@ async def check_provider(
         }
     except (httpx.HTTPError, ValueError, KeyError):
         return {"reachable": False, "model_available": False}
+
+
+class AccountAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["approve", "reject", "disable", "enable"]
+
+
+@router.get("/users")
+async def list_accounts(
+    admin: User = Depends(require_admin), session: AsyncSession = Depends(get_session)
+) -> list[dict[str, object]]:
+    from sqlalchemy import select
+
+    users = (
+        await session.execute(select(User).where(User.role == "USER").order_by(User.id))
+    ).scalars()
+    return [
+        {
+            "id": user.id,
+            "username": user.username,
+            "status": user.status,
+            "created_at": user.created_at.isoformat(),
+        }
+        for user in users
+    ]
+
+
+@router.put("/users/{user_id}")
+async def manage_account(
+    user_id: int,
+    body: AccountAction,
+    admin: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    from sqlalchemy import delete
+
+    user = await session.get(User, user_id)
+    if not user or user.role == "ADMIN":
+        raise HTTPException(404, "Account not found")
+    allowed = {
+        "approve": ("PENDING", "ACTIVE"),
+        "reject": ("PENDING", "REJECTED"),
+        "disable": ("ACTIVE", "DISABLED"),
+        "enable": ("DISABLED", "ACTIVE"),
+    }
+    before, after = allowed[body.action]
+    if user.status != before:
+        raise HTTPException(409, f"Only {before.lower()} accounts can be {body.action}d")
+    user.status = after
+    await session.execute(delete(UserSession).where(UserSession.user_id == user_id))
+    await session.commit()
+    return {"status": after}
+
+
+@router.post("/users/{user_id}/reset-code")
+async def issue_reset_code(
+    user_id: int, admin: User = Depends(require_admin), session: AsyncSession = Depends(get_session)
+) -> dict[str, str]:
+    import secrets
+    from datetime import timedelta
+
+    from app.db.models import PasswordResetCode, utcnow
+
+    user = await session.get(User, user_id)
+    if not user or user.role != "USER" or user.status != "ACTIVE":
+        raise HTTPException(404, "Approved account not found")
+    code = secrets.token_urlsafe(24)
+    await session.merge(
+        PasswordResetCode(
+            user_id=user_id, token_hash=digest(code), expires_at=utcnow() + timedelta(minutes=15)
+        )
+    )
+    await session.commit()
+    # Display once to the admin to share via a trusted channel; never log or email it.
+    return {"code": code, "expires_in": "15 minutes"}

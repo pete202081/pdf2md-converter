@@ -1,6 +1,39 @@
 import type { ApiErrorBody, DiagramReviewItem, Job, JobDetail } from './types';
 
 export const JOBS_URL = '/api/v1/jobs';
+let csrfToken: string | null = null;
+export function setSessionCsrf(token: string | null) { csrfToken = token; }
+export interface AuthSession { authenticated: boolean; username: string | null; role: 'ADMIN' | 'USER' | null; csrf_token: string | null }
+export async function getAuthSession(): Promise<AuthSession> {
+  let response: Response;
+  try { response = await fetch('/api/v1/auth/session'); }
+  catch { throw new Error('Cannot connect to the API. Start Docker Compose and try again.'); }
+  if (!response.ok) throw new Error('Cannot connect to the API. Start Docker Compose and try again.');
+  const session = await response.json() as AuthSession;
+  setSessionCsrf(session.csrf_token);
+  return session;
+}
+export async function authAction(path: string, body: object): Promise<Record<string, string>> {
+  const response = await fetch(`/api/v1/auth/${path}`, { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const result = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    const detail = result.detail;
+    const validation = Array.isArray(detail) ? detail.map((item: { msg?: string }) => item.msg).filter(Boolean).join('; ') : null;
+    throw new Error((typeof detail === 'string' ? detail : validation)
+      || (typeof result.message === 'string' ? result.message : `Request failed (${response.status})`));
+  }
+  return result as Record<string, string>;
+}
+export function changePassword(current_password: string, new_password: string): Promise<{ message: string }> {
+  return request('/api/v1/auth/change-password', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current_password, new_password }) });
+}
+export async function signOut(): Promise<void> {
+  await request('/api/v1/auth/logout', { method: 'POST' });
+  setSessionCsrf(null);
+}
+
 
 export class ApiError extends Error {
   constructor(
@@ -21,7 +54,8 @@ function networkError(): ApiError {
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(url, { ...init, headers: { Accept: 'application/json', ...init?.headers } });
+    response = await fetch(url, { ...init, headers: { Accept: 'application/json',
+      ...(init?.method && !['GET', 'HEAD'].includes(init.method.toUpperCase()) && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}), ...init?.headers } });
   } catch {
     throw networkError();
   }
@@ -89,6 +123,7 @@ export function uploadJob(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', JOBS_URL);
+    if (csrfToken) xhr.setRequestHeader('X-CSRF-Token', csrfToken);
     xhr.responseType = 'json';
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
@@ -125,9 +160,6 @@ export function listDiagramReviews(jobId: string, signal?: AbortSignal): Promise
   return request<DiagramReviewItem[]>(`${JOBS_URL}/${encodeURIComponent(jobId)}/reviews`, { signal });
 }
 
-export async function getAdminSession(): Promise<{ authenticated: boolean; csrf_token: string | null }> {
-  return request<{ authenticated: boolean; csrf_token: string | null }>('/api/v1/admin/session');
-}
 
 export function decideDiagramReview(
   jobId: string, itemId: string, decision: 'ACCEPTED_IMAGE' | 'EDITED_MERMAID',

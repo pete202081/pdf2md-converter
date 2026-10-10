@@ -10,7 +10,7 @@ from sqlalchemy import delete
 
 from app.api.v1.routers.admin import digest, passwords
 from app.config import get_settings
-from app.db.models import AdminAccount, AdminSession, BootstrapCode, utcnow
+from app.db.models import BootstrapCode, User, UserSession, utcnow
 from app.db.session import Database
 
 
@@ -20,11 +20,10 @@ async def main() -> None:
         raise SystemExit("Usage: python -m app.admin_cli [bootstrap-token|reset-password]")
     db = Database(get_settings().database_url)
     try:
-        await db.init_models()
         async with db.session() as session:
-            admin = await session.get(AdminAccount, 1)
+            admin = await session.get(User, 1)
             if command == "reset-password":
-                if not admin:
+                if not admin or admin.status == "SETUP_REQUIRED":
                     raise SystemExit("No administrator account exists yet.")
                 password = getpass.getpass("New administrator password (12+ characters): ")
                 if len(password) < 12 or len(password) > 256:
@@ -32,11 +31,11 @@ async def main() -> None:
                 if password != getpass.getpass("Repeat password: "):
                     raise SystemExit("Passwords do not match.")
                 admin.password_hash = passwords.hash(password)
-                await session.execute(delete(AdminSession))
+                await session.execute(delete(UserSession))
                 await session.commit()
                 print("Password reset; all existing admin sessions signed out.")
                 return
-            if admin:
+            if admin and admin.status != "SETUP_REQUIRED":
                 print("Administrator already configured; no setup code generated.")
                 return
             code = secrets.token_urlsafe(24)

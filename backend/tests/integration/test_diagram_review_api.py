@@ -4,21 +4,24 @@ import json
 import zipfile
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
+import fakeredis.aioredis
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.adapters.storage.file_store import LocalFileStore
-from app.api.deps import get_file_store, get_job_repository, get_session
-from app.api.v1.routers.admin import COOKIE, digest
-from app.db.models import AdminSession, Base, Chapter, DiagramReviewItem, Job, utcnow
+from app.api.deps import get_container, get_file_store, get_job_repository, get_session
+from app.api.v1.routers.auth import COOKIE, digest
+from app.config import Settings
+from app.db.models import Base, Chapter, DiagramReviewItem, Job, User, UserSession, utcnow
 from app.domain.enums import JobStatus
 from app.main import create_app
 from app.repositories.job_repository import JobRepository
 
 
-async def test_review_actions_are_admin_only_and_update_download(tmp_path: Path) -> None:
+async def test_review_actions_require_owner_session_and_update_download(tmp_path: Path) -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -70,7 +73,11 @@ async def test_review_actions_are_admin_only_and_update_download(tmp_path: Path)
         )
         session.add(job)
         session.add(
-            AdminSession(
+            User(id=1, username="admin", password_hash="hashed", role="ADMIN", status="ACTIVE")
+        )
+        session.add(
+            UserSession(
+                user_id=1,
                 token_hash=digest("admin-session"),
                 csrf_token="csrf-secret",
                 expires_at=utcnow() + timedelta(hours=1),
@@ -83,16 +90,20 @@ async def test_review_actions_are_admin_only_and_update_download(tmp_path: Path)
             yield session
 
         app.dependency_overrides[get_session] = override_session
+        app.dependency_overrides[get_container] = lambda: SimpleNamespace(
+            settings=Settings(), redis=fakeredis.aioredis.FakeRedis()
+        )
         app.dependency_overrides[get_file_store] = lambda: store
         app.dependency_overrides[get_job_repository] = lambda: JobRepository(session)
         url = f"/api/v1/jobs/{job_id}/reviews"
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.get(url)).status_code == 401
+            client.cookies.set(COOKIE, "admin-session", path="/api/v1")
             listed = await client.get(url)
             assert listed.status_code == 200 and listed.json()[0]["asset_name"] == "img_p1_x1.png"
             assert (
                 await client.put(f"{url}/{item_id}", json={"decision": "ACCEPTED_IMAGE"})
-            ).status_code == 401
-            client.cookies.set(COOKIE, "admin-session", path="/api/v1")
+            ).status_code == 403
             assert (
                 await client.put(f"{url}/{item_id}", json={"decision": "ACCEPTED_IMAGE"})
             ).status_code == 403
@@ -133,7 +144,9 @@ async def test_review_actions_are_admin_only_and_update_download(tmp_path: Path)
             assert downloaded.status_code == 200
             with zipfile.ZipFile(Path(job.output_path)) as archive:
                 assert "```mermaid" in archive.read("01_One/chapter.md").decode()
-            assert (await client.delete(f"/api/v1/jobs/{job_id}")).status_code == 204
+            assert (
+                await client.delete(f"/api/v1/jobs/{job_id}", headers=headers)
+            ).status_code == 204
             assert not Path(store.get_output_root(job_id)).exists()
             assert not original_zip.exists()
     await engine.dispose()

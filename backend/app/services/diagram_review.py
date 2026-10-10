@@ -1,4 +1,4 @@
-"""Admin review of diagram fallbacks with versioned Markdown/ZIP publication."""
+"""Owner/admin review of local diagram fallbacks with versioned ZIP publication."""
 
 import asyncio
 import json

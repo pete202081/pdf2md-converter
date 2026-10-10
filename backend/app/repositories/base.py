@@ -19,7 +19,9 @@ class IJobRepository(ABC):
         """Fetch a job with its stages and chapters eagerly loaded."""
 
     @abstractmethod
-    async def list(self, *, limit: int = 50, offset: int = 0) -> list[Job]:
+    async def list(
+        self, *, limit: int = 50, offset: int = 0, owner_id: int | None = None
+    ) -> list[Job]:
         """List jobs, newest first."""
 
     @abstractmethod

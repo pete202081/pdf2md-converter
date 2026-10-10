@@ -16,8 +16,8 @@ from app.db.models import Base
 class Database:
     """Owns the async engine and the session factory.
 
-    Phase-1 note: schema is created with ``CREATE TABLE IF NOT EXISTS`` on
-    startup. Alembic migrations will be introduced before production use.
+    Alembic migrates production schema before API/worker start. init_models is
+    retained for isolated SQLite tests only.
     """
 
     def __init__(self, url: str) -> None:

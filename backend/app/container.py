@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.ocr.tesseract_engine import TesseractOcrEngine
 from app.adapters.storage.file_store import IFileStore, LocalFileStore
+from app.adapters.storage.minio_store import MinioObjectStore
 from app.adapters.vlm.factory import build_vlm_provider
 from app.config import Settings, get_settings
 from app.db.session import Database
@@ -39,6 +40,7 @@ from app.services.pipeline.stages.extract_images import ExtractImagesStage
 from app.services.pipeline.stages.extract_tables import ExtractTablesStage
 from app.services.pipeline.stages.extract_text import ExtractTextStage
 from app.services.pipeline.stages.package_output import PackageOutputStage
+from app.services.pipeline.stages.publish_objects import PublishObjectsStage
 from app.services.pipeline.stages.validate_upload import ValidateUploadStage
 from app.services.progress_service import ProgressService
 from app.services.text_extractor import TextExtractor
@@ -56,6 +58,7 @@ class Container:
     database: Database
     redis: aioredis.Redis
     file_store: IFileStore
+    object_store: MinioObjectStore | None = None
 
     # --- repositories (per-session) -------------------------------------
     def job_repository(self, session: AsyncSession) -> IJobRepository:
@@ -85,9 +88,12 @@ class Container:
             job_repository=self.job_repository(session),
             settings=settings or self.settings,
             enqueue=lambda job_id: celery_app.send_task(CONVERSION_TASK_NAME, args=[job_id]),
+            object_store=self.object_store,
         )
 
-    def build_orchestrator(self, session: AsyncSession) -> ConversionOrchestrator:
+    def build_orchestrator(
+        self, session: AsyncSession, upload_path_override: str | None = None
+    ) -> ConversionOrchestrator:
         """Assemble the conversion pipeline.
 
         Stage order matters: detection first, then the extraction stages all
@@ -96,6 +102,10 @@ class Container:
         Mermaid conversion stages run between extraction and assembly.
         """
         progress = self.progress_service(session)
+
+        async def provider_failure(name: str) -> None:
+            await self.redis.hincrby("pdf2md:metrics:provider_failure", name, 1)  # type: ignore[misc]
+
         stages: list[BasePipelineStage] = [
             ValidateUploadStage(progress),
             DetectChaptersStage(progress),
@@ -103,7 +113,11 @@ class Container:
             ExtractTablesStage(progress),
             ExtractImagesStage(progress, ImageExtractor(self.file_store)),
             ClassifyDiagramsStage(progress, self.file_store),
-            ConvertMermaidStage(progress, self.file_store, build_vlm_provider(self.settings)),
+            ConvertMermaidStage(
+                progress,
+                self.file_store,
+                build_vlm_provider(self.settings, on_failure=provider_failure),
+            ),
             AssembleChaptersStage(
                 progress,
                 self.file_store,
@@ -112,12 +126,18 @@ class Container:
             ),
             PackageOutputStage(progress),
         ]
+        if self.object_store and upload_path_override:
+            stages.append(
+                PublishObjectsStage(progress, self.file_store, self.object_store, session)
+            )
         return ConversionOrchestrator(
             stages=stages,
             job_repository=self.job_repository(session),
             stage_repository=self.stage_repository(session),
             file_store=self.file_store,
             settings=self.settings,
+            metrics_redis=self.redis,
+            upload_path_override=upload_path_override,
         )
 
     async def close(self) -> None:
@@ -133,4 +153,14 @@ def build_container(settings: Settings | None = None) -> Container:
         database=Database(settings.database_url),
         redis=aioredis.from_url(settings.redis_url, decode_responses=True),
         file_store=LocalFileStore(settings.upload_dir, settings.output_dir),
+        object_store=(
+            MinioObjectStore(
+                settings.minio_endpoint,
+                settings.minio_access_key,
+                settings.minio_secret_key,
+                settings.minio_bucket,
+            )
+            if settings.minio_endpoint
+            else None
+        ),
     )

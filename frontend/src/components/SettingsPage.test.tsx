@@ -1,8 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import '@testing-library/jest-dom/vitest';
 import SettingsPage from './SettingsPage';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 const ok = (body: unknown) => ({ ok: true, json: async () => body });
 const config = {
   vlm_provider: 'hybrid', ollama_base_url: 'http://ollama:11434', ollama_vision_model: 'llama3.2-vision',
@@ -16,6 +17,7 @@ it('sets up admin, masks keys and saves provider settings with CSRF token', asyn
   const fetcher = vi.fn().mockResolvedValueOnce(ok({ setup_required: true, authenticated: false, csrf_token: null }))
     .mockResolvedValueOnce(ok({ authenticated: true, csrf_token: 'csrf-123' }))
     .mockResolvedValueOnce(ok(config))
+    .mockResolvedValueOnce(ok([]))
     .mockResolvedValueOnce(ok({ ...config, vlm_provider: 'openrouter' }));
   vi.stubGlobal('fetch', fetcher);
   render(<SettingsPage />);
@@ -28,8 +30,58 @@ it('sets up admin, masks keys and saves provider settings with CSRF token', asyn
   expect(screen.queryByText('private-secret')).toBeNull();
   fireEvent.change(screen.getByLabelText('Mode'), { target: { value: 'openrouter' } });
   fireEvent.click(screen.getByText('Save settings'));
-  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4));
-  expect(fetcher.mock.calls[3][1].headers['X-CSRF-Token']).toBe('csrf-123');
-  expect(JSON.parse(fetcher.mock.calls[3][1].body).vlm_provider).toBe('openrouter');
-  expect(JSON.parse(fetcher.mock.calls[3][1].body).openrouter_api_key).toBeUndefined();
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(5));
+  expect(fetcher.mock.calls[4][1].headers['X-CSRF-Token']).toBe('csrf-123');
+  expect(JSON.parse(fetcher.mock.calls[4][1].body).vlm_provider).toBe('openrouter');
+  expect(JSON.parse(fetcher.mock.calls[4][1].body).openrouter_api_key).toBeUndefined();
+});
+
+
+it('refreshes requests manually and when another user signs up while Settings remains open', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  let requests = 0;
+  const fetcher = vi.fn().mockImplementation(async (url: string) => {
+    if (url.endsWith('/session')) return ok({ authenticated: true, setup_required: false, csrf_token: 'csrf-123' });
+    if (url.endsWith('/settings')) return ok(config);
+    if (url.endsWith('/users')) {
+      requests += 1;
+      return ok(requests === 1 ? [] : requests === 2 ? [
+        { id: 2, username: 'reader@example.com', status: 'PENDING', created_at: '2026-10-10' },
+      ] : [
+        { id: 2, username: 'reader@example.com', status: 'PENDING', created_at: '2026-10-10' },
+        { id: 3, username: 'later', status: 'PENDING', created_at: '2026-10-10' },
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  vi.stubGlobal('fetch', fetcher);
+  render(<SettingsPage />);
+  await screen.findByText('No account requests yet.');
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh requests' }));
+  await screen.findByText('reader@example.com');
+  expect(screen.queryByText('No account requests yet.')).toBeNull();
+  await act(async () => { vi.advanceTimersByTime(20_000); });
+  await screen.findByText('later');
+  expect(requests).toBe(3);
+});
+
+it('does not report an empty queue when loading account requests fails', async () => {
+  let attempts = 0;
+  const fetcher = vi.fn().mockImplementation(async (url: string) => {
+    if (url.endsWith('/session')) return ok({ authenticated: true, setup_required: false, csrf_token: 'csrf-123' });
+    if (url.endsWith('/settings')) return ok(config);
+    if (url.endsWith('/users')) {
+      attempts += 1;
+      if (attempts === 1) throw new Error('Network unavailable');
+      return ok([{ id: 2, username: 'reader@example.com', status: 'PENDING', created_at: '2026-10-10' }]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  vi.stubGlobal('fetch', fetcher);
+  render(<SettingsPage />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('Network unavailable');
+  expect(screen.queryByText('No account requests yet.')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh requests' }));
+  await screen.findByText('reader@example.com');
+  expect(screen.queryByRole('alert')).toBeNull();
 });

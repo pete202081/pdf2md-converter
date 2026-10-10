@@ -6,8 +6,9 @@ from pathlib import Path
 from httpx import ASGITransport, AsyncClient
 
 from app.adapters.storage.file_store import LocalFileStore
-from app.api.deps import get_file_store, get_job_repository
-from app.db.models import Job
+from app.api.deps import get_container, get_file_store, get_job_repository
+from app.api.v1.routers.auth import require_user
+from app.db.models import Job, User
 from app.domain.enums import JobStatus
 from app.main import create_app
 from tests.fakes import InMemoryJobRepository
@@ -29,6 +30,12 @@ async def test_download_zip_and_delete_cleans_archive(tmp_path: Path) -> None:
     )
     await repository.create(job)
     app = create_app()
+    app.dependency_overrides[require_user] = lambda: User(
+        id=1, username="admin", role="ADMIN", status="ACTIVE"
+    )
+    app.dependency_overrides[get_container] = lambda: type(
+        "ContainerFake", (), {"object_store": None}
+    )()
     app.dependency_overrides[get_job_repository] = lambda: repository
     app.dependency_overrides[get_file_store] = lambda: store
 
@@ -59,6 +66,12 @@ async def test_download_rejects_unfinished_and_missing_archive(tmp_path: Path) -
     )
     await repository.create(job)
     app = create_app()
+    app.dependency_overrides[require_user] = lambda: User(
+        id=1, username="admin", role="ADMIN", status="ACTIVE"
+    )
+    app.dependency_overrides[get_container] = lambda: type(
+        "ContainerFake", (), {"object_store": None}
+    )()
     app.dependency_overrides[get_job_repository] = lambda: repository
     app.dependency_overrides[get_file_store] = lambda: store
 
@@ -83,6 +96,12 @@ async def test_asset_route_serves_only_images_from_its_job(tmp_path: Path) -> No
     await store.save_output_bytes("job-img", "assets/img_p1_x42.png", b"\x89PNG\r\n\x1a\n")
     await store.save_output_text("job-img", "chapters.json", "private metadata")
     app = create_app()
+    app.dependency_overrides[require_user] = lambda: User(
+        id=1, username="admin", role="ADMIN", status="ACTIVE"
+    )
+    app.dependency_overrides[get_container] = lambda: type(
+        "ContainerFake", (), {"object_store": None}
+    )()
     app.dependency_overrides[get_job_repository] = lambda: repository
     app.dependency_overrides[get_file_store] = lambda: store
 

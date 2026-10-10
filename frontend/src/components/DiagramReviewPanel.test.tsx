@@ -16,7 +16,7 @@ const item = {
   decision: 'PENDING', reason: 'provider_unavailable', mermaid_code: null, reviewed_at: null,
 };
 
-it('locates a fallback, accepts its original with admin CSRF and updates progress', async () => {
+it('locates a fallback, accepts its original with owner CSRF and updates progress', async () => {
   const fetcher = vi.fn().mockResolvedValueOnce(ok([item]))
     .mockResolvedValueOnce(ok({ authenticated: true, csrf_token: 'csrf-token' }))
     .mockResolvedValueOnce(ok({ ...item, decision: 'ACCEPTED_IMAGE' }));
@@ -46,9 +46,9 @@ it('explains legacy jobs and requires sign-in before editing', async () => {
     .mockResolvedValueOnce(ok({ authenticated: false, csrf_token: null }));
   vi.stubGlobal('fetch', fetcher);
   render(<DiagramReviewPanel jobId="newer" onChanged={vi.fn()} onSelectChapter={vi.fn()} />);
-  await screen.findByText(/sign in under Settings/);
+  await screen.findByText(/Sign in to your approved account/);
   await waitFor(() => expect(screen.queryByText('Edit as Mermaid')).toBeNull());
-  expect(screen.getByText('sign in under Settings').getAttribute('href')).toBe('#settings');
+
 });
 
 

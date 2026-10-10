@@ -1,0 +1,58 @@
+# Optional object storage. Start with:
+# docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d --build
+# Set PDF2MD_MINIO_ROOT_USER and PDF2MD_MINIO_ROOT_PASSWORD in .env first.
+services:
+  minio:
+    build: ./docker/minio
+    environment:
+      MINIO_ROOT_USER: ${PDF2MD_MINIO_ROOT_USER:?Set a private MinIO user in .env}
+      MINIO_ROOT_PASSWORD: ${PDF2MD_MINIO_ROOT_PASSWORD:?Set a private MinIO password in .env}
+    volumes:
+      - minio_data:/data
+    # The source-built image includes a healthcheck for the private S3 API.
+    networks:
+      - pdf2md
+    # No public ports or console; private Docker network only.
+
+  minio-init:
+    build: ./backend
+    command: ["python", "-m", "app.minio_init"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PDF2MD_MINIO_ENDPOINT: http://minio:9000
+      PDF2MD_MINIO_ACCESS_KEY: ${PDF2MD_MINIO_ROOT_USER:?Set in .env}
+      PDF2MD_MINIO_SECRET_KEY: ${PDF2MD_MINIO_ROOT_PASSWORD:?Set in .env}
+      PDF2MD_MINIO_BUCKET: ${PDF2MD_MINIO_BUCKET:-pdf2md}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - pdf2md
+    restart: "no"
+
+  api:
+    environment:
+      PDF2MD_STORAGE_BACKEND: minio
+      PDF2MD_MINIO_ENDPOINT: http://minio:9000
+      PDF2MD_MINIO_ACCESS_KEY: ${PDF2MD_MINIO_ROOT_USER:?Set in .env}
+      PDF2MD_MINIO_SECRET_KEY: ${PDF2MD_MINIO_ROOT_PASSWORD:?Set in .env}
+      PDF2MD_MINIO_BUCKET: ${PDF2MD_MINIO_BUCKET:-pdf2md}
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  worker:
+    environment:
+      PDF2MD_STORAGE_BACKEND: minio
+      PDF2MD_MINIO_ENDPOINT: http://minio:9000
+      PDF2MD_MINIO_ACCESS_KEY: ${PDF2MD_MINIO_ROOT_USER:?Set in .env}
+      PDF2MD_MINIO_SECRET_KEY: ${PDF2MD_MINIO_ROOT_PASSWORD:?Set in .env}
+      PDF2MD_MINIO_BUCKET: ${PDF2MD_MINIO_BUCKET:-pdf2md}
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+volumes:
+  minio_data:

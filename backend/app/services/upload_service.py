@@ -9,7 +9,8 @@ from collections.abc import AsyncIterator, Callable
 import aiofiles
 from fastapi import UploadFile
 
-from app.adapters.storage.file_store import IFileStore
+from app.adapters.storage.file_store import IFileStore, sanitize_filename
+from app.adapters.storage.minio_store import MinioObjectStore
 from app.config import Settings
 from app.db.models import Job, utcnow
 from app.domain.enums import JobStatus
@@ -36,14 +37,16 @@ class UploadService:
         job_repository: IJobRepository,
         settings: Settings,
         enqueue: Callable[[str], None],
+        object_store: MinioObjectStore | None = None,
     ) -> None:
         self._file_store = file_store
         self._job_repository = job_repository
         self._settings = settings
         self._enqueue = enqueue
+        self._object_store = object_store
         self._logger = get_logger("UploadService")
 
-    async def accept_upload(self, file: UploadFile) -> Job:
+    async def accept_upload(self, file: UploadFile, *, owner_id: int = 1) -> Job:
         """Validate and store the upload, create the job row, enqueue the task.
 
         Raises:
@@ -81,6 +84,14 @@ class UploadService:
                     "PDF exceeds the maximum supported page count",
                     details={"page_count": page_count, "max_pages": self._settings.max_pages},
                 )
+            if self._settings.storage_backend == "minio":
+                if self._object_store is None:
+                    raise ProcessingError("MinIO storage is not configured")
+                key = self._object_store.key(
+                    owner_id, job_id, f"upload/{sanitize_filename(filename)}"
+                )
+                stored_path = await self._object_store.upload(stored_path, key)
+                await self._file_store.delete_job_files(job_id)
         except AppError:
             # Never leave orphaned files behind on validation failure.
             await self._file_store.delete_job_files(job_id)
@@ -88,12 +99,21 @@ class UploadService:
 
         job = Job(
             id=job_id,
+            owner_id=owner_id,
+            storage_backend=self._settings.storage_backend,
             filename=filename,
             stored_path=stored_path,
             status=JobStatus.QUEUED,
             page_count=page_count,
         )
-        job = await self._job_repository.create(job)
+        try:
+            job = await self._job_repository.create(job)
+        except Exception:
+            if self._settings.storage_backend == "minio" and self._object_store:
+                await self._object_store.delete_prefix(f"{owner_id}/{job_id}/")
+            else:
+                await self._file_store.delete_job_files(job_id)
+            raise
 
         try:
             self._enqueue(job.id)

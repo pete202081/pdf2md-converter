@@ -4,6 +4,7 @@ import { AlertCircle, CheckCircle2, LockKeyhole, Save, Settings2, ShieldCheck } 
 type Provider = 'ollama' | 'openrouter' | 'openai' | 'anthropic';
 type Secret = 'openrouter_api_key' | 'openai_api_key' | 'anthropic_api_key';
 interface SessionState { authenticated: boolean; setup_required: boolean; csrf_token: string | null }
+interface Account { id: number; username: string; status: string; created_at: string }
 interface RuntimeSettings {
   vlm_provider: 'hybrid' | 'cloud' | 'local' | 'openrouter';
   ollama_base_url: string; ollama_vision_model: string;
@@ -39,15 +40,49 @@ export default function SettingsPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
+  const [accountsBusy, setAccountsBusy] = useState(false);
+  const [accountsError, setAccountsError] = useState('');
+  const [resetCode, setResetCode] = useState('');
   useEffect(() => {
     let active = true;
     call<SessionState>('/session').then(async result => {
       if (!active) return;
       setAuth(result);
-      if (result.authenticated) setSettings(await call<RuntimeSettings>('/settings'));
+      if (result.authenticated) {
+        const config = await call<RuntimeSettings>('/settings');
+        if (!active) return;
+        setSettings(config);
+        try {
+          const users = await call<Account[]>('/users');
+          if (active) { setAccounts(users); setAccountsLoaded(true); }
+        } catch (cause) {
+          if (active) setAccountsError(cause instanceof Error ? cause.message : 'Could not load account requests.');
+        }
+      }
     }).catch(cause => { if (active) setError(cause instanceof Error ? cause.message : 'Could not connect.'); });
     return () => { active = false; };
   }, []);
+  // A request may arrive while the administrator keeps Settings open.
+  useEffect(() => {
+    if (!auth?.authenticated) return;
+    let active = true;
+    const timer = window.setInterval(() => {
+      void call<Account[]>('/users').then(result => {
+        if (active) { setAccounts(result); setAccountsLoaded(true); setAccountsError(''); }
+      }).catch(cause => {
+        if (active) setAccountsError(cause instanceof Error ? cause.message : 'Could not refresh account requests.');
+      });
+    }, 20_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [auth?.authenticated]);
+  async function refreshAccounts() {
+    setAccountsBusy(true); setAccountsError('');
+    try { setAccounts(await call<Account[]>('/users')); setAccountsLoaded(true); }
+    catch (cause) { setAccountsError(cause instanceof Error ? cause.message : 'Could not refresh account requests.'); }
+    finally { setAccountsBusy(false); }
+  }
   async function authenticate(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError('');
     try {
@@ -57,6 +92,9 @@ export default function SettingsPage() {
       });
       setAuth({ authenticated: true, setup_required: false, csrf_token: result.csrf_token });
       setSettings(await call<RuntimeSettings>('/settings'));
+      try { setAccounts(await call<Account[]>('/users')); setAccountsLoaded(true); setAccountsError(''); }
+      catch (cause) { setAccountsError(cause instanceof Error ? cause.message : 'Could not load account requests.'); }
+      window.dispatchEvent(new Event('pdf2md-auth-changed'));
       setPassword(''); setCode('');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Sign-in failed.'); }
     finally { setBusy(false); }
@@ -90,8 +128,22 @@ export default function SettingsPage() {
   function text(field: keyof RuntimeSettings, value: string | number) {
     setSettings(previous => previous ? { ...previous, [field]: value } : previous);
   }
+  async function manage(id: number, action: 'approve' | 'reject' | 'disable' | 'enable') {
+    setError(''); setResetCode('');
+    try {
+      await call(`/users/${id}`, { method: 'PUT', body: JSON.stringify({ action }) }, auth?.csrf_token);
+      setAccounts(await call<Account[]>('/users')); setAccountsLoaded(true);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Account update failed.'); }
+  }
+  async function issueReset(id: number) {
+    setError('');
+    try {
+      const result = await call<{ code: string }> (`/users/${id}/reset-code`, { method: 'POST' }, auth?.csrf_token);
+      setResetCode(result.code);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Reset failed.'); }
+  }
   async function logout() {
-    try { await call('/logout', { method: 'POST' }, auth?.csrf_token); setAuth({ authenticated: false, setup_required: false, csrf_token: null }); setSettings(null); }
+    try { await call('/logout', { method: 'POST' }, auth?.csrf_token); setAuth({ authenticated: false, setup_required: false, csrf_token: null }); setSettings(null); setAccounts([]); setAccountsLoaded(false); setAccountsError(''); window.dispatchEvent(new Event('pdf2md-auth-changed')); }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not sign out.'); }
   }
   return <section className="settings-page" aria-label="Settings">
@@ -108,6 +160,18 @@ export default function SettingsPage() {
         <label>Administrator password<input type="password" autoComplete={auth.setup_required ? 'new-password' : 'current-password'} minLength={auth.setup_required ? 12 : 1} value={password} required onChange={event => setPassword(event.target.value)} /></label>
         <button className="download-button" disabled={busy} type="submit">{auth.setup_required ? 'Create account' : 'Sign in'}</button>
       </form> : settings && <form onSubmit={event => void save(event)}>
+        <div className="settings-card"><h2><ShieldCheck size={19} /> Account requests</h2><p>Approve new users before they can access private books. New requests appear automatically within 20 seconds. Reset codes appear once; share them privately.</p>
+          <button type="button" className="secondary-button" disabled={accountsBusy} onClick={() => void refreshAccounts()}>Refresh requests</button>
+          {accountsError && <div className="notice notice-red" role="alert">{accountsError}</div>}
+          {!accountsLoaded && !accountsError && <p>Loading account requests…</p>}
+          {accountsLoaded && accounts.length === 0 && <p>No account requests yet.</p>}
+          {accounts.map(account => <div className="account-row" key={account.id}><strong>{account.username}</strong><span>{account.status}</span>
+            {account.status === 'PENDING' && <><button type="button" className="secondary-button" onClick={() => void manage(account.id, 'approve')}>Approve</button><button type="button" className="secondary-button" onClick={() => void manage(account.id, 'reject')}>Reject</button></>}
+            {account.status === 'ACTIVE' && <><button type="button" className="secondary-button" onClick={() => void manage(account.id, 'disable')}>Disable</button><button type="button" className="secondary-button" onClick={() => void issueReset(account.id)}>Reset code</button></>}
+            {account.status === 'DISABLED' && <button type="button" className="secondary-button" onClick={() => void manage(account.id, 'enable')}>Enable</button>}
+          </div>)}
+          {resetCode && <div className="notice notice-green" role="status">Copy this one-time reset code now (15 minutes): <code>{resetCode}</code></div>}
+        </div>
         <div className="settings-card"><h2><ShieldCheck size={19} /> Provider strategy</h2><p>Hybrid tries Ollama → OpenRouter → OpenAI → Anthropic, skipping unconfigured cloud providers.</p>
           <label>Mode<select value={settings.vlm_provider} onChange={event => text('vlm_provider', event.target.value)}><option value="hybrid">Hybrid: local, then cloud fallback</option><option value="cloud">Configured cloud providers only</option><option value="local">Local Ollama only</option><option value="openrouter">OpenRouter only</option></select></label></div>
         <div className="settings-providers">{names.map(provider => <div className="settings-card" key={provider.id}>

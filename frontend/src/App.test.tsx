@@ -10,11 +10,12 @@ const job = {
 const chapter = { order_index: 1, title: 'Chapter One', folder_name: '01_Chapter_One',
   md_path: '/data/outputs/job-123/01_Chapter_One/chapter.md', mermaid_count: 0, image_count: 1, word_count: 42 };
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); window.location.hash = ''; });
 
 describe('dashboard wiring', () => {
   it('loads saved jobs, chapter preview, image asset and ZIP link', async () => {
     const fetchMock = vi.fn().mockImplementation(async (input: string) => {
+      if (input.includes('/api/v1/auth/session')) return { ok: true, status: 200, json: async () => ({ authenticated: true, username: 'alice', role: 'USER', csrf_token: 'csrf-test' }) };
       if (input.includes('/preview')) return { ok: true, status: 200, text: async () => '# Chapter One\n\n![Diagram](../assets/img_p1_x7.png)' };
       if (input.includes('/job-123')) return { ok: true, status: 200, json: async () => ({ ...job, stages: [], chapters: [chapter] }) };
       return { ok: true, status: 200, json: async () => [job] };
@@ -30,7 +31,7 @@ describe('dashboard wiring', () => {
   it('shows a useful offline state without pretending a job succeeded', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
     render(<App />);
-    await waitFor(() => expect(screen.getByText('API OFFLINE')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     expect(screen.getByRole('alert')).toHaveTextContent('Start Docker Compose');
     expect(screen.queryByRole('link', { name: /Download ZIP/i })).not.toBeInTheDocument();
   });

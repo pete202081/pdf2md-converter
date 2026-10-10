@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AlertCircle, Check, ChevronRight, PencilLine } from 'lucide-react';
-import { decideDiagramReview, getAdminSession, listDiagramReviews, resolveAssetUrl } from '../api/client';
+import { decideDiagramReview, getAuthSession, listDiagramReviews, resolveAssetUrl } from '../api/client';
 import type { DiagramReviewItem } from '../api/types';
 import MermaidDiagram from './MermaidDiagram';
 
@@ -19,14 +19,14 @@ export default function DiagramReviewPanel({ jobId, onSelectChapter, onChanged }
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setItems([]); setError(''); setEditing(null);
-    void Promise.all([listDiagramReviews(jobId, controller.signal), getAdminSession()])
+    void Promise.all([listDiagramReviews(jobId, controller.signal), getAuthSession()])
       .then(([reviews, session]) => { if (!controller.signal.aborted) { setItems(reviews); setCsrf(session.authenticated ? session.csrf_token : null); } })
       .catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load reviews.'); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [jobId]);
   async function decide(item: DiagramReviewItem, decision: 'ACCEPTED_IMAGE' | 'EDITED_MERMAID') {
-    if (!csrf) { setError('Sign in under Settings before saving a review.'); return; }
+    if (!csrf) { setError('Sign in to your approved account before saving a review.'); return; }
     setBusy(true); setError('');
     try {
       const changed = await decideDiagramReview(jobId, item.id, decision, csrf, decision === 'EDITED_MERMAID' ? code : undefined);
@@ -42,7 +42,7 @@ export default function DiagramReviewPanel({ jobId, onSelectChapter, onChanged }
     <div className="diagram-review-head"><div><h3>Review fallback diagrams</h3><p>{loading ? 'Loading…' : items.length ? `${items.length - pending} of ${items.length} reviewed · ${accepted} images accepted · ${edited} Mermaid edits` : 'No item-level review records for this job.'}</p></div></div>
     {error && <div className="notice notice-red" role="alert"><AlertCircle size={16} />{error}</div>}
     {!loading && !items.length && <p className="review-legacy">This conversion predates item-level tracking. Re-upload the PDF to review each fallback diagram.</p>}
-    {!loading && items.length > 0 && !csrf && <p className="review-signin">Viewing is available now. To save decisions, <a href="#settings">sign in under Settings</a>, then return here.</p>}
+    {!loading && items.length > 0 && !csrf && <p className="review-signin">Sign in to your approved account to save decisions.</p>}
     {items.map(item => <article className="review-item" key={item.id}>
       <div className="review-item-image"><img src={resolveAssetUrl(`assets/${item.asset_name}`, jobId) || ''} alt={`Original diagram from PDF page ${item.page_number}`} loading="lazy" /></div>
       <div className="review-item-body"><div className="review-item-title"><strong>Chapter {item.chapter_order} · PDF page {item.page_number}{item.occurrence_index ? ` · candidate #${item.occurrence_index}` : ''}</strong>

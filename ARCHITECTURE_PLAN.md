@@ -1,6 +1,6 @@
 # PDF eBook → Chapter-wise Markdown Converter — Architecture Plan
 
-**Status:** APPROVED 2026-10-09 — Phases 0–4 implemented and locally verified; Phase 5 next
+**Status:** APPROVED 2026-10-09 — Phases 0–5 implemented and locally verified; Phase 5 Docker-host smoke testing outstanding
 **Date:** 2026-10-09
 
 **Locked decisions (user, 2026-10-09):**

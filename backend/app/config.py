@@ -19,6 +19,15 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
     cors_origins: str = "http://localhost:8080"
+    trusted_proxy_cidrs: str = ""  # trust X-Real-IP only from listed reverse-proxy peers
+    force_secure_cookies: bool = False  # set True when TLS is terminated ahead of nginx
+    auth_limit: int = 6  # per IP AND username / 15 minutes
+    signup_limit: int = 4  # per IP AND username / 15 minutes
+    pending_account_cap: int = 200
+    upload_limit_hour: int = 15
+    review_limit_hour: int = 60
+    provider_check_limit_hour: int = 8
+    sse_limit: int = 4
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -30,6 +39,11 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://redis:6379/0"
 
     # Storage (local Docker volumes by default)
+    storage_backend: Literal["local", "minio"] = "local"
+    minio_endpoint: str = ""
+    minio_access_key: str = ""
+    minio_secret_key: str = ""
+    minio_bucket: str = "pdf2md"
     upload_dir: str = "/data/uploads"
     output_dir: str = "/data/outputs"
 

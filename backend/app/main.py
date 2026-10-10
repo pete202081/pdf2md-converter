@@ -13,22 +13,23 @@ from app.api.exception_handlers import (
     app_error_handler,
     unhandled_exception_handler,
 )
-from app.api.v1.routers import admin, events, health, jobs
+from app.api.v1.routers import admin, auth, events, health, jobs, metrics
 from app.config import get_settings
 from app.container import build_container
 from app.domain.exceptions import AppError
 from app.logging import configure_logging
 from app.middleware.correlation import CorrelationIdMiddleware
+from app.middleware.metrics import MetricsMiddleware
 
 
 async def safe_validation_error(request: Request, exc: RequestValidationError) -> Response:
     # FastAPI's default 422 response echoes invalid inputs, including submitted keys.
-    if request.url.path.startswith("/api/v1/admin"):
+    if request.url.path.startswith(("/api/v1/admin", "/api/v1/auth")):
         return JSONResponse(
             status_code=422,
             content={
                 "error_code": "INVALID_REQUEST",
-                "message": "Invalid administrator request",
+                "message": "Invalid account or administrator request",
                 "fields": [".".join(map(str, error["loc"])) for error in exc.errors()],
             },
         )
@@ -37,11 +38,10 @@ async def safe_validation_error(request: Request, exc: RequestValidationError) -
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup/shutdown: configure logging, wire the container, init the DB."""
+    """Startup/shutdown: configure logging and wire the container; migrations run separately."""
     settings = get_settings()
     configure_logging(settings.log_level)
     container = build_container(settings)
-    await container.database.init_models()
     app.state.container = container
     yield
     await container.close()
@@ -55,6 +55,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    app.add_middleware(MetricsMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(
         CORSMiddleware,
@@ -68,6 +69,8 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(events.router)
     app.include_router(admin.router)
+    app.include_router(auth.router)
+    app.include_router(metrics.router)
 
     app.add_exception_handler(RequestValidationError, safe_validation_error)  # type: ignore[arg-type]
     app.add_exception_handler(AppError, app_error_handler)  # type: ignore[arg-type]

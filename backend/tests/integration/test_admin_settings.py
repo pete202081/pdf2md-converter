@@ -14,7 +14,7 @@ from app.adapters.vlm.factory import build_vlm_provider
 from app.api.deps import get_container, get_session
 from app.api.v1.routers.admin import digest
 from app.config import Settings
-from app.db.models import Base, BootstrapCode, RuntimeSetting, utcnow
+from app.db.models import Base, BootstrapCode, RuntimeSetting, User, utcnow
 from app.main import create_app
 from app.services.runtime_settings import RuntimeSettingsService
 
@@ -26,6 +26,9 @@ async def test_setup_signin_and_runtime_settings(tmp_path: Path) -> None:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
+        session.add(
+            User(id=1, username="admin", password_hash="", role="ADMIN", status="SETUP_REQUIRED")
+        )
         session.add(
             BootstrapCode(
                 id=1, token_hash=digest("setup-code"), expires_at=utcnow() + timedelta(minutes=30)

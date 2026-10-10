@@ -10,12 +10,14 @@ Responsibilities:
 
 from typing import Any
 
+from redis.asyncio import Redis
+
 from app.adapters.storage.file_store import IFileStore
 from app.config import Settings
 from app.db.models import utcnow
 from app.domain.enums import JobStatus, StageStatus
 from app.domain.exceptions import NotFoundError
-from app.domain.results import PipelineContext
+from app.domain.results import PipelineContext, StageResult
 from app.logging import get_logger
 from app.repositories.base import IJobRepository, IStageRepository
 from app.services.pipeline.stages.base import BasePipelineStage
@@ -34,12 +36,16 @@ class ConversionOrchestrator:
         stage_repository: IStageRepository,
         file_store: IFileStore,
         settings: Settings,
+        metrics_redis: Redis | None = None,
+        upload_path_override: str | None = None,
     ) -> None:
         self._stages = list(stages)
         self._job_repository = job_repository
         self._stage_repository = stage_repository
         self._file_store = file_store
         self._settings = settings
+        self._metrics_redis = metrics_redis
+        self._upload_path_override = upload_path_override
         self._logger = get_logger("ConversionOrchestrator")
 
     async def run(self, job_id: str) -> JobStatus:
@@ -52,7 +58,7 @@ class ConversionOrchestrator:
 
         ctx = PipelineContext(
             job_id=job_id,
-            upload_path=job.stored_path,
+            upload_path=self._upload_path_override or job.stored_path,
             output_dir=self._file_store.get_output_root(job_id),
             settings=self._settings,
         )
@@ -67,6 +73,7 @@ class ConversionOrchestrator:
             )
 
             result = await stage.run(ctx)
+            await self._record_stage_metric(stage.name, result)
 
             await self._stage_repository.mark(
                 stage_row.id,
@@ -109,6 +116,24 @@ class ConversionOrchestrator:
         self._logger.info("pipeline_finished", job_id=job_id, status=final_status.value)
         return final_status
 
+    async def _record_stage_metric(self, name: str, result: StageResult) -> None:
+        if self._metrics_redis is None:
+            return
+        try:
+            elapsed = max(0, int((result.finished_at - result.started_at).total_seconds() * 1000))
+            await self._metrics_redis.hincrby("pdf2md:metrics:stage_ms", name, elapsed)  # type: ignore[misc]
+            await self._metrics_redis.hincrby("pdf2md:metrics:stage_count", name, 1)  # type: ignore[misc]
+            if name == "convert_mermaid":
+                if result.metrics.get("fallback", 0):
+                    await self._metrics_redis.incrby(
+                        "pdf2md:metrics:fallbacks", int(result.metrics["fallback"])
+                    )
+                if result.status == StageStatus.FAILED or result.metrics.get("fallback", 0):
+                    await self._metrics_redis.incr("pdf2md:metrics:provider_errors")
+        except Exception:
+            # Metrics must not fail a conversion or publish incomplete job state.
+            self._logger.warning("metrics_recording_failed", stage=name)
+
     async def _sync_context(self, job_id: str, ctx: PipelineContext) -> None:
         """Mirror whitelisted stage outputs onto the job row."""
         updates: dict[str, Any] = {
@@ -117,4 +142,10 @@ class ConversionOrchestrator:
         if updates:
             job = await self._job_repository.get(job_id)
             if job is not None:
-                await self._job_repository.update_status(job_id, job.status, **updates)
+                # Do not expose ephemeral worker paths before object publication.
+                if job.storage_backend == "minio" and not str(
+                    updates.get("output_path", "")
+                ).startswith("s3://"):
+                    updates.pop("output_path", None)
+                if updates:
+                    await self._job_repository.update_status(job_id, job.status, **updates)

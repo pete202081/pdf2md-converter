@@ -27,6 +27,12 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"), nullable=False, index=True, default=1
+    )
+    storage_backend: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="local", server_default="local"
+    )
     filename: Mapped[str] = mapped_column(String(512))
     stored_path: Mapped[str] = mapped_column(Text)
     status: Mapped[JobStatus] = mapped_column(
@@ -125,16 +131,32 @@ class RuntimeSetting(Base):
     value: Mapped[str] = mapped_column(Text)
 
 
-class AdminAccount(Base):
-    __tablename__ = "admin_accounts"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+class User(Base):
+    """Admin or approved book owner; pending users cannot access jobs."""
+
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(12), default="USER")
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
-class AdminSession(Base):
-    __tablename__ = "admin_sessions"
+class UserSession(Base):
+    __tablename__ = "user_sessions"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     csrf_token: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PasswordResetCode(Base):
+    __tablename__ = "password_reset_codes"
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

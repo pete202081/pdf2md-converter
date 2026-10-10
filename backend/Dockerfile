@@ -14,6 +14,8 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY app ./app
+COPY alembic.ini ./alembic.ini
+COPY migrations ./migrations
 RUN pip install --no-cache-dir .
 
 RUN useradd --create-home --uid 1000 appuser \

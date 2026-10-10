@@ -1,5 +1,7 @@
 """Build the configured local-first provider chain (composition root helper)."""
 
+from collections.abc import Awaitable, Callable
+
 from app.adapters.vlm.base import IVlmProvider
 from app.adapters.vlm.fallback import FallbackMermaidProvider
 from app.adapters.vlm.http_providers import (
@@ -11,7 +13,9 @@ from app.adapters.vlm.http_providers import (
 from app.config import Settings
 
 
-def build_vlm_provider(settings: Settings) -> IVlmProvider:
+def build_vlm_provider(
+    settings: Settings, on_failure: Callable[[str], Awaitable[None]] | None = None
+) -> IVlmProvider:
     """Ollama → OpenRouter → OpenAI → Anthropic, as configured."""
     providers: list[tuple[str, IVlmProvider]] = []
     timeout = settings.vlm_timeout_seconds
@@ -63,4 +67,4 @@ def build_vlm_provider(settings: Settings) -> IVlmProvider:
                     ),
                 )
             )
-    return FallbackMermaidProvider(providers)
+    return FallbackMermaidProvider(providers, on_failure=on_failure)

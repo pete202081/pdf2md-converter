@@ -66,8 +66,11 @@ class InMemoryJobRepository(IJobRepository):
     async def get(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
 
-    async def list(self, *, limit: int = 50, offset: int = 0) -> list[Job]:
-        return list(self.jobs.values())[offset : offset + limit]
+    async def list(
+        self, *, limit: int = 50, offset: int = 0, owner_id: int | None = None
+    ) -> list[Job]:
+        jobs = [job for job in self.jobs.values() if owner_id is None or job.owner_id == owner_id]
+        return jobs[offset : offset + limit]
 
     async def update_status(self, job_id: str, status: JobStatus, **fields: Any) -> Job | None:
         job = self.jobs.get(job_id)

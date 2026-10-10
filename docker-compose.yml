@@ -1,8 +1,14 @@
 name: pdf2md
 
 # Shared backend configuration (anchors keep api + worker identical)
+x-service-logging: &service-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-backend-environment: &backend-environment
-  PDF2MD_DATABASE_URL: postgresql+asyncpg://pdf2md:pdf2md@db:5432/pdf2md
+  PDF2MD_DATABASE_URL: postgresql+asyncpg://pdf2md:${PDF2MD_DB_PASSWORD:-pdf2md}@db:5432/pdf2md
   PDF2MD_REDIS_URL: redis://redis:6379/0
   PDF2MD_CELERY_BROKER_URL: redis://redis:6379/0
   PDF2MD_CELERY_RESULT_BACKEND: redis://redis:6379/0
@@ -10,6 +16,15 @@ x-backend-environment: &backend-environment
   PDF2MD_OUTPUT_DIR: /data/outputs
   PDF2MD_LOG_LEVEL: INFO
   PDF2MD_ENVIRONMENT: production
+  PDF2MD_TRUSTED_PROXY_CIDRS: ${PDF2MD_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+  PDF2MD_FORCE_SECURE_COOKIES: ${PDF2MD_FORCE_SECURE_COOKIES:-false}
+  PDF2MD_AUTH_LIMIT: ${PDF2MD_AUTH_LIMIT:-6}
+  PDF2MD_SIGNUP_LIMIT: ${PDF2MD_SIGNUP_LIMIT:-4}
+  PDF2MD_PENDING_ACCOUNT_CAP: ${PDF2MD_PENDING_ACCOUNT_CAP:-200}
+  PDF2MD_UPLOAD_LIMIT_HOUR: ${PDF2MD_UPLOAD_LIMIT_HOUR:-15}
+  PDF2MD_REVIEW_LIMIT_HOUR: ${PDF2MD_REVIEW_LIMIT_HOUR:-60}
+  PDF2MD_PROVIDER_CHECK_LIMIT_HOUR: ${PDF2MD_PROVIDER_CHECK_LIMIT_HOUR:-8}
+  PDF2MD_SSE_LIMIT: ${PDF2MD_SSE_LIMIT:-4}
   PDF2MD_OLLAMA_BASE_URL: ${PDF2MD_OLLAMA_BASE_URL:-http://ollama:11434}
 
 x-backend-volumes: &backend-volumes
@@ -21,9 +36,10 @@ x-backend-volumes: &backend-volumes
 
 services:
   web:
+    logging: *service-logging
     build: ./frontend
     ports:
-      - "8080:80"
+      - "${PDF2MD_WEB_BIND:-127.0.0.1}:${PDF2MD_WEB_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_healthy
@@ -31,6 +47,8 @@ services:
       - pdf2md
 
   api:
+    mem_limit: ${PDF2MD_API_MEMORY:-1g}
+    logging: *service-logging
     build: ./backend
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
@@ -39,8 +57,8 @@ services:
     environment: *backend-environment
     volumes: *backend-volumes
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
@@ -53,6 +71,8 @@ services:
       - pdf2md
 
   worker:
+    mem_limit: ${PDF2MD_WORKER_MEMORY:-4g}
+    logging: *service-logging
     build: ./backend
     command: ["celery", "-A", "app.worker.celery_app:celery_app", "worker",
               "--loglevel=info", "--concurrency=2"]
@@ -62,18 +82,35 @@ services:
     environment: *backend-environment
     volumes: *backend-volumes
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
       - pdf2md
+
+  migrate:
+    logging: *service-logging
+    build: ./backend
+    command: ["python", "-m", "app.migrate_cli"]
+    env_file:
+      - path: .env
+        required: false
+    environment: *backend-environment
+    volumes: *backend-volumes
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - pdf2md
+    restart: "no"
 
   # Optional local vision model. The profile starts Ollama and pulls the model
   # into a persistent volume (large download; suitable RAM/CPU/GPU required).
   # Without it, hybrid mode tries Ollama then any configured cloud key; if all
   # are unavailable, original diagrams survive and the job is PARTIAL.
   ollama:
+    logging: *service-logging
     image: ollama/ollama:latest
     profiles: ["local-vlm"]
     volumes:
@@ -82,6 +119,7 @@ services:
       - pdf2md
 
   ollama-pull:
+    logging: *service-logging
     image: ollama/ollama:latest
     profiles: ["local-vlm"]
     entrypoint:
@@ -97,6 +135,8 @@ services:
       - pdf2md
 
   redis:
+    mem_limit: ${PDF2MD_REDIS_MEMORY:-512m}
+    logging: *service-logging
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
@@ -110,10 +150,12 @@ services:
       - pdf2md
 
   db:
+    mem_limit: ${PDF2MD_DB_MEMORY:-1g}
+    logging: *service-logging
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: pdf2md
-      POSTGRES_PASSWORD: pdf2md
+      POSTGRES_PASSWORD: ${PDF2MD_DB_PASSWORD:-pdf2md}
       POSTGRES_DB: pdf2md
     volumes:
       - db_data:/var/lib/postgresql/data

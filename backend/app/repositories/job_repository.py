@@ -32,8 +32,12 @@ class JobRepository(IJobRepository):
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
-    async def list(self, *, limit: int = 50, offset: int = 0) -> list[Job]:
+    async def list(
+        self, *, limit: int = 50, offset: int = 0, owner_id: int | None = None
+    ) -> list[Job]:
         statement = select(Job).order_by(Job.created_at.desc()).limit(limit).offset(offset)
+        if owner_id is not None:
+            statement = statement.where(Job.owner_id == owner_id)
         result = await self._session.execute(statement)
         return list(result.scalars().all())
 

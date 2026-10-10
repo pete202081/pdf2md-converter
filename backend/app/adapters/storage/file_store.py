@@ -2,7 +2,7 @@
 
 Stores uploaded PDFs and generated outputs under two roots. All path
 construction goes through :func:`_resolve_under` to prevent path traversal.
-A S3-compatible adapter (MinIO) can be added later behind the same interface.
+The optional MinIO adapter publishes worker-staged local files as private objects.
 """
 
 from __future__ import annotations
