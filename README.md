@@ -17,7 +17,7 @@ docker compose up --build
 ```
 
 - React app (upload, progress, preview, ZIP): http://localhost:8080
-- Swagger API docs: http://localhost:8080/docs
+- Swagger API docs: http://localhost:8080/docs (ReDoc: http://localhost:8080/redoc). Both use self-hosted assets compatible with the site-wide CSP; the live OpenAPI schema comes from `/openapi.json`. ReDoc search is disabled because its blob-based worker conflicts with the strict CSP (Swagger UI remains searchable). For Docker updates, rebuild the **web** image (`docker compose up -d --build web`) because it contains the docs pages and assets.
 - Health checks: http://localhost:8080/healthz and http://localhost:8080/readyz
 
 Docker starts nginx (`web`, serving the built React app), FastAPI (`api`), a Celery worker, Redis and PostgreSQL. A one-shot `migrate` service upgrades the database before API/worker start; it refuses unexpected unversioned schemas. Uploads, generated output and database data persist in named Docker volumes. The backend image includes Tesseract for scanned PDFs. For diagram conversion, the default **hybrid** mode tries local Ollama first, then whichever cloud keys are configured; if none work, the original image is retained and the job becomes `PARTIAL`. Ordinary non-diagram images do not require a VLM.
