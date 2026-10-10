@@ -1,4 +1,4 @@
-import type { ApiErrorBody, DiagramReviewItem, EditableChapter, Job, JobDetail, QualitySummary } from './types';
+import type { ApiErrorBody, DiagramReviewItem, EditableChapter, Job, JobDetail, QualitySummary, LibrarySearchResponse } from './types';
 
 export const JOBS_URL = '/api/v1/jobs';
 let csrfToken: string | null = null;
@@ -66,6 +66,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+export function searchLibrary(query: string, signal?: AbortSignal): Promise<LibrarySearchResponse> {
+  return request('/api/v1/search', { method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, limit: 30 }),
+  });
 }
 
 export function listJobs(signal?: AbortSignal): Promise<Job[]> {

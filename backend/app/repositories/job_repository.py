@@ -2,11 +2,11 @@
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Job, utcnow
+from app.db.models import Job, SearchDocument, utcnow
 from app.domain.enums import JobStatus
 from app.repositories.base import IJobRepository
 
@@ -57,6 +57,9 @@ class JobRepository(IJobRepository):
         job = await self.get(job_id)
         if job is None:
             return False
+        # Also clean SQLite test databases where foreign-key PRAGMA may be disabled.
+        # Production's ON DELETE CASCADE remains the primary guarantee.
+        await self._session.execute(delete(SearchDocument).where(SearchDocument.job_id == job_id))
         await self._session.delete(job)
         await self._session.commit()
         return True

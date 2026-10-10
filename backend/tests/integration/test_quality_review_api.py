@@ -25,6 +25,7 @@ from app.db.models import (
     DiagramReviewItem,
     Job,
     PageQualityFlag,
+    SearchDocument,
     User,
     UserSession,
     utcnow,
@@ -32,6 +33,7 @@ from app.db.models import (
 from app.domain.enums import JobStatus
 from app.main import create_app
 from app.repositories.job_repository import JobRepository
+from app.services.library_search import SearchIndexService, search_library
 from app.services.quality_review import QualityReviewService, content_hash
 
 
@@ -127,6 +129,8 @@ async def test_quality_review_owner_pages_flags_edit_and_undo(
             )
         )
         await session.commit()
+        await SearchIndexService(session, store, None).index_job(job_id)
+        assert (await search_library(session, 2, False, "Original text", 10))["results"]
         app = create_app()
         container = SimpleNamespace(settings=Settings(), redis=redis, object_store=None)
         app.dependency_overrides[get_container] = lambda: container
@@ -185,6 +189,8 @@ async def test_quality_review_owner_pages_flags_edit_and_undo(
                 json={"expected_hash": editor["hash"], "markdown": updated},
             )
             assert saved.status_code == 200, saved.text
+            assert not (await search_library(session, 2, False, "Original text", 10))["results"]
+            assert (await search_library(session, 2, False, "Corrected table row", 10))["results"]
             assert saved.json()["hash"] != editor["hash"]
             assert (await client.get(base)).json()["flags"][0]["reviewed_at"] is None
             assert (
@@ -209,6 +215,10 @@ async def test_quality_review_owner_pages_flags_edit_and_undo(
                 json={"expected_hash": saved.json()["hash"]},
             )
             assert undo.status_code == 200, undo.text
+            assert not (await search_library(session, 2, False, "Corrected table row", 10))[
+                "results"
+            ]
+            assert (await search_library(session, 2, False, "Original text", 10))["results"]
             assert (await client.get(f"{base}/chapters/1")).json()["markdown"] == md
             assert (
                 await client.post(
@@ -245,6 +255,9 @@ async def test_quality_review_owner_pages_flags_edit_and_undo(
             ).status_code == 409
             newest = (await client.get(f"{base}/chapters/1")).json()["markdown"]
             assert "Corrected table row." in newest and "```mermaid" in newest
+            assert (await search_library(session, 2, False, "Corrected table row", 10))["results"]
+            document = await session.get(SearchDocument, (job_id, 1))
+            assert document and document.content_hash == content_hash(newest)
             old_download = current.output_path
             old_chapter = current.chapters[0].md_path
             import app.services.quality_review as quality_module

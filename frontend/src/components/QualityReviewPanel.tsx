@@ -3,9 +3,9 @@ import { getEditableChapter, getQualitySummary, reviewQualityPage, saveQualityCh
 import type { EditableChapter, QualitySummary } from '../api/types';
 import MarkdownPreview from './MarkdownPreview';
 
-interface Props { jobId: string; initialChapterOrder: number | null; onChanged: () => void }
+interface Props { jobId: string; initialChapterOrder: number | null; initialPage?: number | null; onChanged: () => void }
 
-export default function QualityReviewPanel({ jobId, initialChapterOrder, onChanged }: Props) {
+export default function QualityReviewPanel({ jobId, initialChapterOrder, initialPage, onChanged }: Props) {
   const [summary, setSummary] = useState<QualitySummary | null>(null);
   const [order, setOrder] = useState<number | null>(initialChapterOrder);
   const [page, setPage] = useState(1);
@@ -38,12 +38,12 @@ export default function QualityReviewPanel({ jobId, initialChapterOrder, onChang
     if (!pages) { setChapter(null); return; }
     let active = true;
     setChapter(null); setDraft(''); setEditing(false); setImageError(false); setError('');
-    setPage(pages[0]);
+    setPage(initialPage !== null && initialPage !== undefined && initialPage >= pages[0] && initialPage <= pages[1] ? initialPage : pages[0]);
     getEditableChapter(jobId, order!).then(result => {
       if (active) { setChapter(result); setDraft(result.markdown); }
     }).catch(cause => { if (active) setError(cause instanceof Error ? cause.message : 'Could not load chapter.'); });
     return () => { active = false; };
-  }, [jobId, order, pages?.[0], pages?.[1]]);
+  }, [jobId, order, pages?.[0], pages?.[1], initialPage]);
 
   async function reloadChapter() {
     if (order === null) return;

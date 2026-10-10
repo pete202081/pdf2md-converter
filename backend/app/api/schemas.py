@@ -45,6 +45,7 @@ class JobOut(BaseModel):
     error: str | None = None
     review_total: int = 0
     review_pending: int = 0
+    search_index_state: str = "PENDING"
 
 
 class JobDetailOut(JobOut):

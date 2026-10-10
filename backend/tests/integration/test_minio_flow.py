@@ -19,13 +19,15 @@ from app.adapters.storage.minio_store import MinioObjectStore
 from app.api.deps import get_container, get_file_store, get_job_repository, get_session
 from app.api.v1.routers.auth import require_user
 from app.config import Settings
-from app.db.models import Base, Chapter, DiagramReviewItem, Job, User
+from app.db.models import Base, Chapter, DiagramReviewItem, Job, SearchDocument, User
 from app.domain.enums import JobStatus
 from app.domain.results import PipelineContext
 from app.main import create_app
 from app.repositories.job_repository import JobRepository
+from app.services.library_search import SearchIndexService
 from app.services.minio_diagram_review import MinioDiagramReviewService
 from app.services.pipeline.stages.publish_objects import PublishObjectsStage
+from app.services.quality_review import content_hash
 from app.services.upload_service import UploadService
 
 
@@ -116,10 +118,17 @@ async def test_minio_job_and_local_legacy_coexist(tmp_path: Path) -> None:
             await session.commit()
             assert job.chapters[0].md_path.startswith("s3://books/2/")
             assert await remote.exists(job.output_path)
+            await SearchIndexService(session, local, remote).index_job(job.id)
+            old_doc = await session.get(SearchDocument, (job.id, 1))
+            assert old_doc is not None
+            old_hash = old_doc.content_hash
             review = MinioDiagramReviewService(session, remote)
             changed = await review.decide(job.id, marker, "EDITED_MERMAID", "flowchart TD\nA --> B")
             assert changed.decision == "EDITED_MERMAID"
-            assert "```mermaid" in await remote.read_text(job.chapters[0].md_path)
+            revised_md = await remote.read_text(job.chapters[0].md_path)
+            assert "```mermaid" in revised_md
+            await session.refresh(old_doc)
+            assert old_doc.content_hash == content_hash(revised_md) != old_hash
             assert job.output_path.endswith("download.zip")
             # A prior local job remains accessible after MinIO is selected for new jobs.
             legacy_path = tmp_path / "outputs" / "legacy.zip"

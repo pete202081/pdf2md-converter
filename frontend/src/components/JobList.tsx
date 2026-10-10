@@ -24,7 +24,7 @@ export default function JobList({ jobs, selectedId, loading, onSelect }: Props) 
         <span className="job-file-icon"><FileText size={19} strokeWidth={1.7} /></span>
         <span className="job-item-main">
           <strong title={job.filename}>{job.filename}</strong>
-          <span className="job-item-meta"><span className={`status-dot status-${job.status.toLowerCase()}`} />{statusLabel(job.status, job.review_total, job.review_pending)} <i>·</i> {formatDate(job.created_at)}</span>
+          <span className="job-item-meta"><span className={`status-dot status-${job.status.toLowerCase()}`} />{statusLabel(job.status, job.review_total, job.review_pending)} <i>·</i> {formatDate(job.created_at)}{(job.status === 'SUCCEEDED' || job.status === 'PARTIAL') && job.search_index_state && job.search_index_state !== 'READY' && <> <i>·</i> {job.search_index_state === 'ERROR' ? 'Search unavailable' : 'Search pending'}</>}</span>
         </span>
         <ArrowUpRight className="job-arrow" size={17} />
       </button>)}

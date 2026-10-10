@@ -1,6 +1,7 @@
 """Tests for the conversion orchestrator (sequencing + failure policy)."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import fakeredis.aioredis
@@ -143,3 +144,31 @@ async def test_unknown_job_raises_not_found(tmp_path: Path) -> None:
 
     with pytest.raises(NotFoundError):
         await orchestrator.run("does-not-exist")
+
+
+async def test_search_index_failure_never_changes_completed_conversion(tmp_path: Path) -> None:
+    progress = make_progress()
+    orchestrator, jobs, _ = make_orchestrator(tmp_path, [SucceedStage(progress)])
+    await jobs.create(
+        Job(
+            id="search-failure", filename="b.pdf", stored_path="/tmp/b.pdf", status=JobStatus.QUEUED
+        )
+    )
+    state = {"rolled_back": False, "invalidated": False}
+
+    async def fail_index(job_id: str) -> int:
+        raise RuntimeError("private indexing error")
+
+    async def rollback() -> None:
+        state["rolled_back"] = True
+
+    async def invalidate(job_id: str) -> None:
+        state["invalidated"] = True
+
+    orchestrator._search_indexer = SimpleNamespace(
+        index_job=fail_index, session=SimpleNamespace(rollback=rollback), invalidate=invalidate
+    )
+    assert await orchestrator.run("search-failure") == JobStatus.SUCCEEDED
+    assert state == {"rolled_back": True, "invalidated": True}
+    job = await jobs.get("search-failure")
+    assert job and job.status == JobStatus.SUCCEEDED

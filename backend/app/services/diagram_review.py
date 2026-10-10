@@ -17,6 +17,7 @@ from app.adapters.storage.file_store import IFileStore
 from app.db.models import DiagramReviewItem, Job, utcnow
 from app.domain.enums import JobStatus
 from app.domain.exceptions import ConflictError, NotFoundError, ProviderError, ValidationError
+from app.services.library_search import SearchIndexService
 from app.services.mermaid_validation import validate_mermaid
 from app.services.revision_archive import write_revision
 
@@ -157,6 +158,9 @@ class DiagramReviewService:
             job.output_path = new_zip
             job.updated_at = utcnow()
             item.decision, item.mermaid_code, item.reviewed_at = decision, code, utcnow()
+            await SearchIndexService(self._session, self._store, None).revision(
+                job, chapter, updated_text
+            )
             await self._session.commit()
         except Exception:
             await self._session.rollback()

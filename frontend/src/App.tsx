@@ -5,6 +5,8 @@ import type { AuthSession } from './api/client';
 import AuthGate from './components/AuthGate';
 import type { Job } from './api/types';
 import JobList from './components/JobList';
+import LibrarySearch from './components/LibrarySearch';
+import type { LibrarySearchHit } from './api/types';
 import JobWorkspace from './components/JobWorkspace';
 import UploadPanel from './components/UploadPanel';
 import SettingsPage from './components/SettingsPage';
@@ -36,6 +38,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   const { jobs, selectedId, selectJob, detail, error, setError, connection, loading,
     refreshJobs, refreshDetail } = useJobs();
   const [toast, setToast] = useState('');
+  const [searchTarget, setSearchTarget] = useState<{ hit: LibrarySearchHit; source: boolean; key: number } | null>(null);
   const [passwordPanel, setPasswordPanel] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [nextPassword, setNextPassword] = useState('');
@@ -52,7 +55,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     void refreshDetail();
   }, [refreshJobs, refreshDetail]);
   const { events, streamState } = useJobStream(
-    selectedId, Boolean(selectedId && (!selected || !isTerminal(selected.status))), onTerminal,
+    selectedId, Boolean(selectedId && selected && !isTerminal(selected.status)), onTerminal,
   );
   const completed = jobs.filter(job => job.status === 'SUCCEEDED' || job.status === 'PARTIAL').length;
   const totalChapters = jobs.reduce((count, job) => count + job.chapter_count, 0);
@@ -70,6 +73,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     try {
       await deleteJob(id);
       setToast('Conversion and files deleted.');
+      selectJob('');
       await refreshJobs();
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not delete job.'); }
   }
@@ -112,9 +116,14 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
       {toast && <div className="toast" role="status">✳ &nbsp;{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification"><X size={14} /></button></div>}
 
       <div className="dashboard-grid">
-        <div className="left-column"><UploadPanel onUploaded={onUploaded} /><JobList jobs={jobs} selectedId={selectedId} loading={loading} onSelect={selectJob} /></div>
+        <div className="left-column"><UploadPanel onUploaded={onUploaded} /><LibrarySearch onOpen={(hit, source) => {
+          selectJob(hit.job_id);
+          setSearchTarget({ hit, source, key: Date.now() });
+          setPage('workspace');
+          window.location.hash = '#workspace';
+        }} /><JobList jobs={jobs} selectedId={selectedId} loading={loading} onSelect={selectJob} /></div>
         <JobWorkspace job={selected} detail={detail?.id === selectedId ? detail : null} events={events}
-          streamState={streamState} onDelete={id => void onDelete(id)}
+          searchTarget={searchTarget} streamState={streamState} onDelete={id => void onDelete(id)}
           onRefresh={() => { void refreshJobs(); void refreshDetail(); }} />
       </div>
 

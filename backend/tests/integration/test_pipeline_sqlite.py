@@ -16,12 +16,13 @@ from pathlib import Path
 
 import fakeredis.aioredis
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.adapters.storage.file_store import LocalFileStore
 from app.config import Settings
-from app.db.models import Base, Job, PageQualityFlag
+from app.db.models import Base, Job, PageQualityFlag, SearchDocument
 from app.domain.enums import JobStatus, StageStatus
 from app.repositories.chapter_repository import ChapterRepository
 from app.repositories.diagram_review_repository import DiagramReviewRepository
@@ -30,6 +31,7 @@ from app.repositories.progress_repository import ProgressRepository
 from app.repositories.stage_repository import StageRepository
 from app.services.diagram_review import DiagramReviewService
 from app.services.image_extractor import ImageExtractor
+from app.services.library_search import SearchIndexService, search_library
 from app.services.pipeline.orchestrator import ConversionOrchestrator
 from app.services.pipeline.stages.assemble_chapters import AssembleChaptersStage
 from app.services.pipeline.stages.classify_diagrams import ClassifyDiagramsStage
@@ -119,6 +121,7 @@ async def test_full_pipeline_end_to_end(session: AsyncSession, tmp_path: Path) -
         stage_repository=stage_repository,
         file_store=file_store,
         settings=settings,
+        search_indexer=SearchIndexService(session, file_store, None),
     )
 
     status = await orchestrator.run("job-1")
@@ -134,7 +137,14 @@ async def test_full_pipeline_end_to_end(session: AsyncSession, tmp_path: Path) -
     assert job.output_path is not None and job.output_path.endswith(".zip")
     assert job.error is None
     assert job.quality_inventory_ready
-    from sqlalchemy import select
+    assert job.search_index_state == "READY"
+    indexed = (
+        await session.scalars(select(SearchDocument).where(SearchDocument.job_id == "job-1"))
+    ).all()
+    assert len(indexed) == 2
+    table_matches = (await search_library(session, 1, False, "Paris", 10))["results"]
+    assert table_matches and table_matches[0]["first_page"] == 2
+    assert table_matches[0]["last_page"] == 4
 
     flags = (
         await session.scalars(select(PageQualityFlag).where(PageQualityFlag.job_id == "job-1"))

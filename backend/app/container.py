@@ -30,6 +30,7 @@ from app.repositories.job_repository import JobRepository
 from app.repositories.progress_repository import ProgressRepository
 from app.repositories.stage_repository import StageRepository
 from app.services.image_extractor import ImageExtractor
+from app.services.library_search import SearchIndexService
 from app.services.pipeline.orchestrator import ConversionOrchestrator
 from app.services.pipeline.stages.assemble_chapters import AssembleChaptersStage
 from app.services.pipeline.stages.base import BasePipelineStage
@@ -140,6 +141,7 @@ class Container:
             settings=self.settings,
             metrics_redis=self.redis,
             upload_path_override=upload_path_override,
+            search_indexer=SearchIndexService(session, self.file_store, self.object_store),
         )
 
     async def close(self) -> None:

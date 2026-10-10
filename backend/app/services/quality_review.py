@@ -22,6 +22,7 @@ from app.adapters.storage.minio_store import MinioObjectStore
 from app.db.models import Chapter, ChapterEdit, Job, PageQualityFlag, utcnow
 from app.domain.enums import JobStatus
 from app.domain.exceptions import ConflictError, NotFoundError, StorageError, ValidationError
+from app.services.library_search import SearchIndexService
 from app.services.revision_archive import write_revision
 
 _FINISHED = (JobStatus.SUCCEEDED, JobStatus.PARTIAL)
@@ -335,6 +336,9 @@ class QualityReviewService:
             ).all()
             for flag in flags:
                 flag.reviewed_at, flag.reviewed_by_id = None, None
+            await SearchIndexService(self.session, self.local, self.remote).revision(
+                job, chapter, updated
+            )
         except Exception:
             await self._discard_revision(job.id, job.owner_id, job.storage_backend, new_zip)
             raise

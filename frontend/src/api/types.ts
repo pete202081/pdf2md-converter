@@ -12,6 +12,7 @@ export interface Job {
   error: string | null;
   review_total?: number;
   review_pending?: number;
+  search_index_state?: 'PENDING' | 'READY' | 'ERROR';
 }
 
 export interface Stage {
@@ -83,3 +84,14 @@ export interface QualitySummary {
   flags: QualityFlag[];
 }
 export interface EditableChapter { markdown: string; hash: string; can_undo: boolean }
+
+export interface LibrarySearchHit {
+  job_id: string;
+  filename: string;
+  chapter_order: number;
+  chapter_title: string;
+  first_page: number | null;
+  last_page: number | null;
+  excerpt: string;
+}
+export interface LibrarySearchResponse { results: LibrarySearchHit[]; pending_books: number }

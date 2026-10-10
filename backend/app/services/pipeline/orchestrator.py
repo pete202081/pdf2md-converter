@@ -20,6 +20,7 @@ from app.domain.exceptions import NotFoundError
 from app.domain.results import PipelineContext, StageResult
 from app.logging import get_logger
 from app.repositories.base import IJobRepository, IStageRepository
+from app.services.library_search import SearchIndexService
 from app.services.pipeline.stages.base import BasePipelineStage
 
 # Context keys that are mirrored onto the job row after each stage.
@@ -38,6 +39,7 @@ class ConversionOrchestrator:
         settings: Settings,
         metrics_redis: Redis | None = None,
         upload_path_override: str | None = None,
+        search_indexer: SearchIndexService | None = None,
     ) -> None:
         self._stages = list(stages)
         self._job_repository = job_repository
@@ -46,6 +48,7 @@ class ConversionOrchestrator:
         self._settings = settings
         self._metrics_redis = metrics_redis
         self._upload_path_override = upload_path_override
+        self._search_indexer = search_indexer
         self._logger = get_logger("ConversionOrchestrator")
 
     async def run(self, job_id: str) -> JobStatus:
@@ -113,6 +116,18 @@ class ConversionOrchestrator:
                 else None
             ),
         )
+        if final_status in (JobStatus.SUCCEEDED, JobStatus.PARTIAL) and self._search_indexer:
+            try:
+                await self._search_indexer.index_job(job_id)
+            except Exception:
+                # Never fail an already published and downloadable conversion.
+                self._logger.warning("conversion_search_index_failed", job_id=job_id)
+                await self._search_indexer.session.rollback()
+                try:
+                    await self._search_indexer.invalidate(job_id)
+                except Exception:
+                    self._logger.warning("conversion_search_invalidation_failed", job_id=job_id)
+                    await self._search_indexer.session.rollback()
         self._logger.info("pipeline_finished", job_id=job_id, status=final_status.value)
         return final_status
 

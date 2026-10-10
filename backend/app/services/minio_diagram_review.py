@@ -22,6 +22,7 @@ from app.services.diagram_review import (
     render_block,
     replace_block,
 )
+from app.services.library_search import SearchIndexService
 from app.services.mermaid_validation import validate_mermaid
 from app.services.revision_archive import write_revision
 
@@ -112,6 +113,9 @@ class MinioDiagramReviewService:
                 job.output_path = new_zip
                 job.updated_at = utcnow()
                 item.decision, item.mermaid_code, item.reviewed_at = decision, code, utcnow()
+                await SearchIndexService(self.session, None, self.store).revision(
+                    job, chapter, updated
+                )
                 await self.session.commit()
                 return item
         except Exception:

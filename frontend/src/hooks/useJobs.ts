@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getJob, listJobs } from '../api/client';
+import { ApiError, getJob, listJobs } from '../api/client';
 import type { Job, JobDetail } from '../api/types';
 
 const POLL_MS = 5000; // SSE is primary; polling catches missed events / worker crashes.
@@ -29,7 +29,7 @@ export function useJobs() {
       setJobs(items);
       setConnection('online');
       setError(null);
-      if (!items.some(item => item.id === selectedRef.current)) {
+      if (!selectedRef.current) {
         selectJob(items[0]?.id || '');
       }
     } catch (cause) {
@@ -47,9 +47,12 @@ export function useJobs() {
       const updated = await getJob(id);
       if (selectedRef.current === id) setDetail(updated);
     } catch (cause) {
-      if (selectedRef.current === id) setError(cause instanceof Error ? cause.message : 'Could not load job.');
+      if (selectedRef.current === id) {
+        if (cause instanceof ApiError && cause.status === 404) selectJob('');
+        else setError(cause instanceof Error ? cause.message : 'Could not load job.');
+      }
     }
-  }, [selectedId]);
+  }, [selectedId, selectJob]);
 
   useEffect(() => {
     void refreshJobs();

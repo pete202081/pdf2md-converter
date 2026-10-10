@@ -52,6 +52,9 @@ class Job(Base):
     quality_inventory_ready: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false"
     )
+    search_index_state: Mapped[str] = mapped_column(
+        String(16), default="PENDING", server_default="PENDING"
+    )
     chapter_count: Mapped[int] = mapped_column(Integer, default=0)
     output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -231,3 +234,21 @@ class ChapterEdit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     undone_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+
+class SearchDocument(Base):
+    """One current chapter revision, indexed for private book search."""
+
+    __tablename__ = "search_documents"
+
+    job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True
+    )
+    chapter_order: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chapter_title: Mapped[str] = mapped_column(String(512))
+    book_filename: Mapped[str] = mapped_column(String(512))
+    content: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    first_page: Mapped[int | None] = mapped_column(Integer)
+    last_page: Mapped[int | None] = mapped_column(Integer)
+    indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

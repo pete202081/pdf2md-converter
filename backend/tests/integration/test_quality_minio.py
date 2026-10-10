@@ -13,6 +13,7 @@ from app.adapters.storage.file_store import LocalFileStore
 from app.adapters.storage.minio_store import MinioObjectStore
 from app.db.models import Base, Chapter, Job, User
 from app.domain.enums import JobStatus
+from app.services.library_search import SearchIndexService, search_library
 from app.services.quality_review import QualityReviewService, content_hash
 
 
@@ -74,6 +75,8 @@ async def test_minio_quality_source_edit_undo_keeps_prior_revision(tmp_path: Pat
                 )
             )
             await session.commit()
+            await SearchIndexService(session, local, remote).index_job("s3quality")
+            assert (await search_library(session, 2, False, "Old paragraph", 10))["results"]
             service = QualityReviewService(session, local, remote)
             job = await session.get(Job, "s3quality")
             assert job is not None
@@ -84,7 +87,10 @@ async def test_minio_quality_source_edit_undo_keeps_prior_revision(tmp_path: Pat
             assert job.output_path != zip_uri and await remote.exists(job.output_path)
             assert await remote.exists(zip_uri)
             assert saved["hash"] == content_hash(new)
+            assert not (await search_library(session, 2, False, "Old paragraph", 10))["results"]
+            assert (await search_library(session, 2, False, "Corrected paragraph", 10))["results"]
             undo = await service.undo(job.id, 1, saved["hash"], actor_id=2)
             assert undo["hash"] == content_hash(md)
             assert await remote.read_text(job.chapters[0].md_path) == md
+            assert (await search_library(session, 2, False, "Old paragraph", 10))["results"]
         await engine.dispose()

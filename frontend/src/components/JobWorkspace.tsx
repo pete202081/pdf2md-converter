@@ -5,7 +5,7 @@ import {
   Sparkles, Trash2, Workflow,
 } from 'lucide-react';
 import { downloadUrl, getChapterMarkdown } from '../api/client';
-import type { Job, JobDetail, ProgressEvent } from '../api/types';
+import type { Job, JobDetail, LibrarySearchHit, ProgressEvent } from '../api/types';
 import { canDownload, formatDate, isTerminal, prettyStage, statusLabel } from '../lib/format';
 import MarkdownPreview from './MarkdownPreview';
 import DiagramReviewPanel from './DiagramReviewPanel';
@@ -16,11 +16,12 @@ interface Props {
   detail: JobDetail | null;
   events: ProgressEvent[];
   streamState: 'idle' | 'live' | 'reconnecting';
+  searchTarget?: { hit: LibrarySearchHit; source: boolean; key: number } | null;
   onDelete: (id: string) => void;
   onRefresh: () => void;
 }
 
-export default function JobWorkspace({ job, detail, events, streamState, onDelete, onRefresh }: Props) {
+export default function JobWorkspace({ job, detail, events, streamState, searchTarget, onDelete, onRefresh }: Props) {
   const [order, setOrder] = useState<number | null>(null);
   const [markdown, setMarkdown] = useState('');
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -36,6 +37,12 @@ export default function JobWorkspace({ job, detail, events, streamState, onDelet
   const percent = isTerminal(job?.status ?? 'QUEUED') ? 100 : latest?.percent ?? (job?.status === 'RUNNING' ? 8 : 0);
 
   useEffect(() => { setOrder(null); setMarkdown(''); setMode('rendered'); setReviewOpen(false); setQualityOpen(false); }, [job?.id]);
+  useEffect(() => {
+    if (job?.id && searchTarget?.hit.job_id === job.id) {
+      setOrder(searchTarget.hit.chapter_order);
+      setQualityOpen(searchTarget.source);
+    }
+  }, [job?.id, searchTarget?.key]);
   useEffect(() => {
     if (chapters.length && !chapters.some(chapter => chapter.order_index === order)) {
       setOrder(chapters[0].order_index);
@@ -98,11 +105,13 @@ export default function JobWorkspace({ job, detail, events, streamState, onDelet
       <div className="progress-footer"><span>{streamState === 'live' && !isTerminal(job.status) ? <><span className="live-dot" /> LIVE UPDATES</> : streamState === 'reconnecting' ? 'RECONNECTING · POLLING CONTINUES' : isTerminal(job.status) ? 'ALL STAGES FINISHED' : 'UPDATES EVERY FEW SECONDS'}</span><span>{detail?.stages.filter(stage => stage.status === 'SUCCEEDED').length ?? 0} / {detail?.stages.length ?? '—'} stages</span></div>
     </div>
 
+    {canDownload(job.status) && job.search_index_state && job.search_index_state !== 'READY' && <div className="notice notice-amber"><AlertCircle size={17} /><span>{job.search_index_state === 'ERROR' ? 'This book is not searchable right now.' : 'This book is awaiting search indexing.'} Your ZIP is still available; an administrator can run the search reindex command.</span></div>}
     {job.status === 'PARTIAL' && <div className="notice notice-amber"><AlertCircle size={17} /><span>{job.review_total ? (job.review_pending === 0 ? `Review complete for ${job.review_total} fallback diagrams.` : `${job.review_pending ?? job.review_total} of ${job.review_total} fallback diagrams awaiting review.`) : `${job.error || 'Some diagrams stayed as images.'} Re-upload this older PDF for item-level review.`} Conversion is complete; the ZIP remains downloadable.</span><button type="button" className="review-link" onClick={() => setReviewOpen(!reviewOpen)}>{reviewOpen ? 'Hide review' : 'Review diagrams'}</button></div>}
     {job.status === 'PARTIAL' && reviewOpen && <DiagramReviewPanel jobId={job.id} onSelectChapter={setOrder} onChanged={() => { setPreviewRevision(value => value + 1); onRefresh(); }} />}
     {job.status === 'FAILED' && <div className="notice notice-red"><AlertCircle size={17} /><span>{job.error || 'The conversion did not finish. Check the stages below.'}</span></div>}
 
     {qualityOpen && isTerminal(job.status) && job.status !== 'FAILED' && <QualityReviewPanel jobId={job.id} initialChapterOrder={order}
+      initialPage={searchTarget?.source && searchTarget.hit.job_id === job.id ? searchTarget.hit.first_page : null}
       onChanged={() => { setPreviewRevision(value => value + 1); onRefresh(); }} />}
 
     <div className="workspace-toolbar">

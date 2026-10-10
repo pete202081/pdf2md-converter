@@ -89,6 +89,19 @@ class MinioObjectStore:
         except Exception as exc:
             raise StorageError("Could not retrieve object") from exc
 
+    async def read_text_limited(self, uri: str, max_bytes: int) -> str:
+        """Read a current immutable chapter only when its object is within a cap."""
+        key = self.parse(uri)
+        try:
+            metadata = await asyncio.to_thread(self.client.head_object, Bucket=self.bucket, Key=key)
+            if int(metadata["ContentLength"]) > max_bytes:
+                raise StorageError("Chapter exceeds search indexing size limit")
+        except StorageError:
+            raise
+        except Exception as exc:
+            raise StorageError("Could not inspect chapter object") from exc
+        return await self.read_text(uri)
+
     async def exists(self, uri: str) -> bool:
         key = self.parse(uri)
         try:

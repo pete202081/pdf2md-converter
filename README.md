@@ -122,6 +122,27 @@ On a finished book, click **Review quality**. Select a chapter and a source page
 
 Older jobs are not automatically reprocessed: they have no measured quality-hint inventory until re-uploaded. If an older job still has its original PDF and `chapters.json` page map, source comparison and manual editing are available; otherwise the panel explains what is missing. PDF pages and edits require the owner or administrator; original PDFs are never served as public URLs. Local and optional MinIO jobs keep their respective storage backends. The page-view limit defaults to 300 per user per hour (`PDF2MD_PAGE_VIEW_LIMIT_HOUR`); manual edit/review actions use the existing review limit. The source-page image is rendered on demand and may take longer with MinIO, because the private PDF must first be staged. The Docker/PostgreSQL/live MinIO flow should be exercised on your deployment host before relying on it for important data.
 
+### Search your private library (Phase 7)
+
+**Phase 7 indexing fix:** Some older PDF chapters contain embedded NUL/control bytes. The search index now replaces those bytes with spaces in its private searchable copy; it does not edit chapter Markdown or ZIP archives. After installing this update, rerun the normal reindex command below. Books already marked `READY` are skipped; books marked `ERROR` are retried.
+
+After backing up the database and storage volumes, deploy with `docker compose up -d --build` (for optional MinIO, use both Compose files). The one-shot migration adds a private PostgreSQL full-text chapter index without reading your existing files. **New** completed conversions are indexed after local files or private MinIO objects are published; chapter text/table edits, undo and Mermaid review updates replace the matching index row in the same SQL transaction as the new chapter pointer. Search is optional: if indexing fails, the book and downloadable ZIP remain intact, and the search state is shown in the library. Deleted books disappear from search.
+
+The **Search the shelf** box finds finished books by filename, chapter title, or extracted Markdown text (including table values). Users search only their own books; admins can search all books they are already allowed to inspect. A hit opens the matching chapter. The page range belongs to the **chapter**, not the exact phrase; **View first source page** opens the existing quality-review viewer, if the source PDF/page map is still available. Older jobs without a trustworthy chapter page range display “Source-page range unavailable.” Search excerpts are plain text, never interpreted as HTML. English-language PostgreSQL full-text search is used (not AI); there is no search for text not present in the converted chapter.
+
+**Index already converted books:** after migration, from the project root on the Docker host run:
+
+```bash
+# Default local-storage stack; run without --force to skip READY books:
+docker compose run --rm worker python -m app.search_reindex_cli
+# Optional MinIO stack: use the same Compose overlays as your deployment:
+docker compose -f docker-compose.yml -f docker-compose.minio.yml run --rm worker python -m app.search_reindex_cli
+# Rebuild all finished indexes after a repair (optional):
+docker compose run --rm worker python -m app.search_reindex_cli --force --batch-size 25
+```
+
+Indexing caps a chapter at 4 MiB of Markdown and indexes at most the first 2 million normalized characters; oversized/unreadable chapters mark the book unavailable without affecting its ZIP. The command is resumable/idempotent: it indexes one book per transaction, continues past unavailable files, marks failures `ERROR`, and reports totals without printing private chapter text. Repair missing paths/objects and rerun; the default command retries pending/error books. The worker must have access to the historical local `outputs` volume and/or MinIO credentials. It does **not** re-upload PDFs, regenerate Markdown or call a VLM. For an API check, sign in and send a CSRF-protected `POST /api/v1/search` with JSON `{"query":"a word or phrase","limit":20}`; max query length is 100 and max limit 50. Do not put private terms in URL query parameters. Search uses Redis-backed limits of 60 requests/user/hour and 240 requests/IP/hour. **PostgreSQL/Compose smoke test is still required on a Docker host**; the sandbox has no Docker CLI.
+
 ### Use the web app
 
 Open http://localhost:8080 and drop a PDF into the upload panel. Select a recent job to watch its **SSE progress** and stage history; polling also refreshes if the stream drops. Click a chapter to switch between rendered Markdown (including Mermaid, tables and images) and raw source, copy its Markdown, or download the ordered ZIP. `PARTIAL` jobs remain downloadable with original diagram images preserved; finished jobs can be deleted from the workspace. The interface shows a clear offline notice when the API is not running.
@@ -201,6 +222,8 @@ Tests include provider HTTP-contract and fallback tests, classifier/validator te
 | 3 | ✅ | Embedded raster diagram classification + Mermaid; hybrid Ollama → OpenRouter → OpenAI → Anthropic, image fallback |
 | 4 | ✅ | React frontend: upload, SSE progress, chapter Markdown/Mermaid preview, ZIP download, job management |
 | 5 | locally implemented; Docker-host smoke test outstanding | Migrations, private approved accounts, limits, internal metrics, optional MinIO backend |
+| 6 | implemented; user-confirmed deployment | Quality review, revisions and source-page comparison |
+| 7 | locally implemented; Docker-host smoke test outstanding | Private searchable book library and resumable backfill |
 
 ## Configuration
 
