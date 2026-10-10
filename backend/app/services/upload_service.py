@@ -1,0 +1,117 @@
+"""Upload use-case: validate, store, persist job, enqueue conversion."""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from collections.abc import AsyncIterator, Callable
+
+import aiofiles
+from fastapi import UploadFile
+
+from app.adapters.storage.file_store import IFileStore
+from app.config import Settings
+from app.db.models import Job, utcnow
+from app.domain.enums import JobStatus
+from app.domain.exceptions import AppError, ProcessingError, ValidationError
+from app.logging import get_logger
+from app.repositories.base import IJobRepository
+from app.services.pdf_utils import count_pdf_pages
+
+_CHUNK_SIZE = 1024 * 1024  # 1 MB
+_PDF_MAGIC = b"%PDF-"
+
+
+class UploadService:
+    """Accepts an uploaded PDF, validates it, and queues a conversion job.
+
+    Dependencies are injected (Dependency Inversion): the file store, the job
+    repository, settings, and an ``enqueue`` callable — which makes the service
+    fully unit-testable without Celery or a database.
+    """
+
+    def __init__(
+        self,
+        file_store: IFileStore,
+        job_repository: IJobRepository,
+        settings: Settings,
+        enqueue: Callable[[str], None],
+    ) -> None:
+        self._file_store = file_store
+        self._job_repository = job_repository
+        self._settings = settings
+        self._enqueue = enqueue
+        self._logger = get_logger("UploadService")
+
+    async def accept_upload(self, file: UploadFile) -> Job:
+        """Validate and store the upload, create the job row, enqueue the task.
+
+        Raises:
+            ValidationError: for any client-fixable problem (type, size, pages).
+            ProcessingError: if the job could not be queued.
+        """
+        filename = file.filename or "upload.pdf"
+        if not filename.lower().endswith(".pdf"):
+            raise ValidationError("Only PDF files are supported", details={"filename": filename})
+
+        job_id = uuid.uuid4().hex
+        size = 0
+
+        async def chunks() -> AsyncIterator[bytes]:
+            nonlocal size
+            while True:
+                chunk = await file.read(_CHUNK_SIZE)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > self._settings.max_upload_bytes:
+                    raise ValidationError(
+                        "Uploaded file exceeds the maximum allowed size",
+                        details={"max_bytes": self._settings.max_upload_bytes},
+                    )
+                yield chunk
+
+        try:
+            stored_path = await self._file_store.save_upload(job_id, filename, chunks())
+            if not await self._has_pdf_magic(stored_path):
+                raise ValidationError("The uploaded file is not a valid PDF (missing PDF header)")
+            page_count = await asyncio.to_thread(count_pdf_pages, stored_path)
+            if page_count > self._settings.max_pages:
+                raise ValidationError(
+                    "PDF exceeds the maximum supported page count",
+                    details={"page_count": page_count, "max_pages": self._settings.max_pages},
+                )
+        except AppError:
+            # Never leave orphaned files behind on validation failure.
+            await self._file_store.delete_job_files(job_id)
+            raise
+
+        job = Job(
+            id=job_id,
+            filename=filename,
+            stored_path=stored_path,
+            status=JobStatus.QUEUED,
+            page_count=page_count,
+        )
+        job = await self._job_repository.create(job)
+
+        try:
+            self._enqueue(job.id)
+        except Exception as exc:
+            await self._job_repository.update_status(
+                job_id,
+                JobStatus.FAILED,
+                error="Failed to enqueue conversion job",
+                finished_at=utcnow(),
+            )
+            raise ProcessingError("Could not queue the conversion job — please try again") from exc
+
+        self._logger.info("job_accepted", job_id=job.id, filename=filename, page_count=page_count)
+        return job
+
+    @staticmethod
+    async def _has_pdf_magic(path: str, head_size: int = 1024) -> bool:
+        """Check for the %PDF- header within the first KB (per PDF spec)."""
+        async with aiofiles.open(path, "rb") as handle:
+            head = await handle.read(head_size)
+        return _PDF_MAGIC in head

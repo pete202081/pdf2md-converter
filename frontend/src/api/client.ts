@@ -1,0 +1,141 @@
+import type { ApiErrorBody, DiagramReviewItem, Job, JobDetail } from './types';
+
+export const JOBS_URL = '/api/v1/jobs';
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code: string,
+    public readonly correlationId?: string | null,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+function networkError(): ApiError {
+  return new ApiError('Cannot connect to the API. Start Docker Compose and try again.', 0, 'NETWORK_ERROR');
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, headers: { Accept: 'application/json', ...init?.headers } });
+  } catch {
+    throw networkError();
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as ApiErrorBody;
+    throw new ApiError(body.message || `Request failed (${response.status})`, response.status,
+      body.error_code || 'HTTP_ERROR', body.correlation_id);
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+export function listJobs(signal?: AbortSignal): Promise<Job[]> {
+  return request<Job[]>(`${JOBS_URL}?limit=100`, { signal });
+}
+
+export function getJob(jobId: string, signal?: AbortSignal): Promise<JobDetail> {
+  return request<JobDetail>(`${JOBS_URL}/${encodeURIComponent(jobId)}`, { signal });
+}
+
+export async function getChapterMarkdown(jobId: string, order: number, signal?: AbortSignal): Promise<string> {
+  let response: Response;
+  try {
+    response = await fetch(`${JOBS_URL}/${encodeURIComponent(jobId)}/chapters/${order}/preview`, { signal });
+  } catch {
+    throw networkError();
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as ApiErrorBody;
+    throw new ApiError(body.message || 'Could not load chapter', response.status, body.error_code || 'HTTP_ERROR');
+  }
+  return response.text();
+}
+
+export function deleteJob(jobId: string): Promise<void> {
+  return request<void>(`${JOBS_URL}/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+}
+
+export function downloadUrl(jobId: string): string {
+  return `${JOBS_URL}/${encodeURIComponent(jobId)}/download`;
+}
+
+export function eventsUrl(jobId: string): string {
+  return `${JOBS_URL}/${encodeURIComponent(jobId)}/events`;
+}
+
+// The server only exposes generated image filenames inside this job's assets/.
+const ASSET_RE = /^(?:\.\.\/)?assets\/([A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|webp|gif|bmp|tiff?|jpx|jp2))$/i;
+export function resolveAssetUrl(url: string, jobId: string): string | null {
+  const match = ASSET_RE.exec(url);
+  return match ? `${JOBS_URL}/${encodeURIComponent(jobId)}/assets/${encodeURIComponent(match[1])}` : null;
+}
+
+export function validatePdf(file: File): string | null {
+  if (!file.name.toLowerCase().endsWith('.pdf')) return 'Please choose a PDF file.';
+  if (file.size === 0) return 'This file is empty. Please choose another PDF.';
+  return null;
+}
+
+export function uploadJob(
+  file: File,
+  onProgress: (percent: number) => void,
+  signal?: AbortSignal,
+): Promise<Job> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', JOBS_URL);
+    xhr.responseType = 'json';
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
+    };
+    xhr.onload = () => {
+      const body = xhr.response as Job | ApiErrorBody | null;
+      if (xhr.status === 201) resolve(body as Job);
+      else if (xhr.status === 413) {
+        // Nginx can return an HTML error page, so responseType=json is null.
+        reject(new ApiError(
+          'The upload was rejected as too large. The default PDF limit is 50 MiB. If this file is smaller, rebuild the web container to apply the Nginx limit; otherwise use a smaller PDF or raise both limits.',
+          413, 'UPLOAD_TOO_LARGE',
+        ));
+      } else {
+        const error = body as ApiErrorBody | null;
+        reject(new ApiError(error?.message || `Upload failed (${xhr.status})`, xhr.status,
+          error?.error_code || 'UPLOAD_ERROR', error?.correlation_id));
+      }
+    };
+    xhr.onerror = () => reject(networkError());
+    xhr.onabort = () => reject(new DOMException('Upload cancelled', 'AbortError'));
+    const abort = () => xhr.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    xhr.onloadend = () => signal?.removeEventListener('abort', abort);
+    if (signal?.aborted) { reject(new DOMException('Upload cancelled', 'AbortError')); return; }
+    const form = new FormData();
+    form.append('file', file);
+    xhr.send(form);
+  });
+}
+
+
+export function listDiagramReviews(jobId: string, signal?: AbortSignal): Promise<DiagramReviewItem[]> {
+  return request<DiagramReviewItem[]>(`${JOBS_URL}/${encodeURIComponent(jobId)}/reviews`, { signal });
+}
+
+export async function getAdminSession(): Promise<{ authenticated: boolean; csrf_token: string | null }> {
+  return request<{ authenticated: boolean; csrf_token: string | null }>('/api/v1/admin/session');
+}
+
+export function decideDiagramReview(
+  jobId: string, itemId: string, decision: 'ACCEPTED_IMAGE' | 'EDITED_MERMAID',
+  csrf: string, mermaidCode?: string,
+): Promise<DiagramReviewItem> {
+  return request<DiagramReviewItem>(
+    `${JOBS_URL}/${encodeURIComponent(jobId)}/reviews/${encodeURIComponent(itemId)}`,
+    { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify({ decision, ...(mermaidCode !== undefined ? { mermaid_code: mermaidCode } : {}) }) },
+  );
+}

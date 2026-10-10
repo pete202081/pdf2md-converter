@@ -1,0 +1,138 @@
+name: pdf2md
+
+# Shared backend configuration (anchors keep api + worker identical)
+x-backend-environment: &backend-environment
+  PDF2MD_DATABASE_URL: postgresql+asyncpg://pdf2md:pdf2md@db:5432/pdf2md
+  PDF2MD_REDIS_URL: redis://redis:6379/0
+  PDF2MD_CELERY_BROKER_URL: redis://redis:6379/0
+  PDF2MD_CELERY_RESULT_BACKEND: redis://redis:6379/0
+  PDF2MD_UPLOAD_DIR: /data/uploads
+  PDF2MD_OUTPUT_DIR: /data/outputs
+  PDF2MD_LOG_LEVEL: INFO
+  PDF2MD_ENVIRONMENT: production
+  PDF2MD_OLLAMA_BASE_URL: ${PDF2MD_OLLAMA_BASE_URL:-http://ollama:11434}
+
+x-backend-volumes: &backend-volumes
+  - uploads:/data/uploads
+  - outputs:/data/outputs
+  - settings_keys:/data/settings-keys
+  # Bind mount for development: code changes apply without rebuilding
+  - ./backend/app:/app/app
+
+services:
+  web:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - pdf2md
+
+  api:
+    build: ./backend
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - path: .env
+        required: false
+    environment: *backend-environment
+    volumes: *backend-volumes
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - pdf2md
+
+  worker:
+    build: ./backend
+    command: ["celery", "-A", "app.worker.celery_app:celery_app", "worker",
+              "--loglevel=info", "--concurrency=2"]
+    env_file:
+      - path: .env
+        required: false
+    environment: *backend-environment
+    volumes: *backend-volumes
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - pdf2md
+
+  # Optional local vision model. The profile starts Ollama and pulls the model
+  # into a persistent volume (large download; suitable RAM/CPU/GPU required).
+  # Without it, hybrid mode tries Ollama then any configured cloud key; if all
+  # are unavailable, original diagrams survive and the job is PARTIAL.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["local-vlm"]
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - pdf2md
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: ["local-vlm"]
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "until ollama list; do sleep 3; done; ollama pull ${PDF2MD_OLLAMA_VISION_MODEL:-llama3.2-vision}"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_started
+    networks:
+      - pdf2md
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pdf2md
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pdf2md
+      POSTGRES_PASSWORD: pdf2md
+      POSTGRES_DB: pdf2md
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdf2md -d pdf2md"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - pdf2md
+
+volumes:
+  uploads:
+  outputs:
+  db_data:
+  redis_data:
+  ollama_models:
+  settings_keys:
+
+networks:
+  pdf2md:
+    driver: bridge
