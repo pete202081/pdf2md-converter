@@ -1,6 +1,7 @@
 """Private MinIO-backed source page and revision publication (mocked S3)."""
 
 import json
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -93,4 +94,27 @@ async def test_minio_quality_source_edit_undo_keeps_prior_revision(tmp_path: Pat
             assert undo["hash"] == content_hash(md)
             assert await remote.read_text(job.chapters[0].md_path) == md
             assert (await search_library(session, 2, False, "Old paragraph", 10))["results"]
+            # Direct cleanup needs neither source PDF nor source-page mapping.
+            await remote.delete_prefix(remote.key(2, "s3quality", "upload") + "/")
+            direct = md.replace("# One", "# Revised").replace(
+                "Old paragraph.", "Revised text.\n\n```mermaid\nflowchart TD\nA --> B\n```"
+            )
+            result = await service.edit(
+                job.id, 1, content_hash(md), direct, actor_id=2, direct=True
+            )
+            new_md = await remote.read_text(job.chapters[0].md_path)
+            assert result["hash"] == content_hash(new_md)
+            assert 'title: "Revised"' in new_md
+            assert job.chapters[0].mermaid_count == 1
+            assert (await search_library(session, 2, False, "Revised text", 10))["results"]
+            with tempfile.TemporaryDirectory() as temp:
+                dest = Path(temp) / "revision.zip"
+                await remote.download(job.output_path, dest)
+                with zipfile.ZipFile(dest) as revised_zip:
+                    assert revised_zip.read("01_One/chapter.md").decode() == new_md
+                    manifest = json.loads(revised_zip.read("chapters.json"))
+                    assert manifest["chapters"][0]["title"] == "Revised"
+            await service.undo(job.id, 1, result["hash"], actor_id=2, direct=True)
+            assert job.chapters[0].title == "One"
+            assert job.chapters[0].mermaid_count == 0
         await engine.dispose()

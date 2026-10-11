@@ -45,6 +45,7 @@ class AssembleChaptersStage(BasePipelineStage):
         manifest: list[dict[str, Any]] = []
 
         for chapter in chapters:
+            await ctx.ensure_active()
             chapter_blocks = [
                 block for block in blocks if chapter.start_page <= block.page <= chapter.end_page
             ]

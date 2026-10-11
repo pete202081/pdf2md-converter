@@ -1,5 +1,6 @@
 """Value objects passed between pipeline stages."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -33,3 +34,8 @@ class PipelineContext:
     output_dir: str
     settings: Settings
     data: dict[str, Any] = field(default_factory=dict)
+    cancellation_check: Callable[[], Awaitable[None]] | None = None
+
+    async def ensure_active(self) -> None:
+        if self.cancellation_check is not None:
+            await self.cancellation_check()

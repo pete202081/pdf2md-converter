@@ -332,6 +332,7 @@ async def test_mermaid_pipeline_success_or_image_fallback(
         "candidates": 2,
         "converted": 0 if fail else 2,
         "fallback": 2 if fail else 0,
+        "vision_disabled": fail,
     }
 
     rows = await chapters.list_for_job(job_id)

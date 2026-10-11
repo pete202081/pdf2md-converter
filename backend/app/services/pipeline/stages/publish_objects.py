@@ -47,8 +47,10 @@ class PublishObjectsStage(BasePipelineStage):
                 lambda: sorted(p for p in root.rglob("*") if p.is_file())
             )
             for path in files:
+                await ctx.ensure_active()
                 relative = path.relative_to(root).as_posix()
                 published[relative] = await self._remote.upload(path, prefix + relative)
+            await ctx.ensure_active()
             zip_uri = await self._remote.upload(zip_path, prefix + "download.zip")
             for chapter in job.chapters:
                 if chapter.md_path:

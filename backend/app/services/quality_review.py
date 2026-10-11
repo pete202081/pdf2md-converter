@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import uuid
 import zipfile
+from collections import Counter
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -21,8 +22,15 @@ from app.adapters.storage.file_store import IFileStore
 from app.adapters.storage.minio_store import MinioObjectStore
 from app.db.models import Chapter, ChapterEdit, Job, PageQualityFlag, utcnow
 from app.domain.enums import JobStatus
-from app.domain.exceptions import ConflictError, NotFoundError, StorageError, ValidationError
+from app.domain.exceptions import (
+    ConflictError,
+    NotFoundError,
+    ProviderError,
+    StorageError,
+    ValidationError,
+)
 from app.services.library_search import SearchIndexService
+from app.services.mermaid_validation import validate_mermaid
 from app.services.revision_archive import write_revision
 
 _FINISHED = (JobStatus.SUCCEEDED, JobStatus.PARTIAL)
@@ -36,14 +44,41 @@ _LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 _ASSET_LINK = re.compile(
     r"^\.\./assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|webp|gif|bmp|tiff?|jpx|jp2)$", re.I
 )
-_RAW_HTML = re.compile(r"<\s*/?\s*[a-z][^>]*>", re.I)
+_RAW_HTML = re.compile(r"<!--.*?-->|<\s*/?\s*[a-z][^>]*>|<![^>]*>|<\?[^>]*>", re.I | re.S)
+
+
+def _raw_html_tokens(markdown: str) -> Counter[str]:
+    """Count untrusted HTML already present in extracted Markdown.
+
+    Extraction may have included markup before this editor existed. A revision
+    may retain or remove those exact tokens, but cannot introduce new ones.
+    Generated review/page-break comments are handled by their own validators.
+    """
+    body = _MARKER.sub("", markdown).replace("<!-- page break -->", "")
+    counts: Counter[str] = Counter()
+    position = 0
+    while True:
+        start = body.find("<!--", position)
+        if start < 0:
+            counts.update(_RAW_HTML.findall(body[position:]))
+            break
+        counts.update(_RAW_HTML.findall(body[position:start]))
+        end = body.find("-->", start + 4)
+        if end < 0:
+            # One unclosed comment consumes the remainder; scan it once, not
+            # quadratically for every `<!--` inside attacker-controlled text.
+            counts["<!--"] += 1
+            break
+        counts[body[start : end + 3]] += 1
+        position = end + 3
+    return counts
 
 
 def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def validate_edit(old: str, new: str) -> None:
+def validate_edit(old: str, new: str, *, full_content: bool = False) -> None:
     if not new.strip() or len(new.encode("utf-8")) > 2 * 1024 * 1024:
         raise ValidationError("Chapter text must be non-empty and at most 2 MiB")
     old_meta, new_meta = _FRONTMATTER.match(old), _FRONTMATTER.match(new)
@@ -56,12 +91,22 @@ def validate_edit(old: str, new: str) -> None:
         or len(_MARKER.findall(new)) != 2 * len(after)
     ):
         raise ValidationError("Diagram review regions must remain unchanged; use Review diagrams")
-    if _MERMAID.findall(old) != _MERMAID.findall(new):
+    if full_content:
+        # Only diagram bodies outside protected review anchors may change.
+        fenced = _MERMAID.findall(new)
+        if len(re.findall(r"(?:```|~~~)mermaid\b", new, re.I)) != len(fenced):
+            raise ValidationError("Mermaid code fences must be complete")
+        for fence in fenced:
+            try:
+                validate_mermaid("\n".join(fence.splitlines()[1:-1]))
+            except ProviderError as exc:
+                raise ValidationError("Invalid or unsafe Mermaid diagram") from exc
+    elif _MERMAID.findall(old) != _MERMAID.findall(new):
         raise ValidationError("Mermaid diagrams must remain unchanged; use Review diagrams")
-    # Review markers and page-break comments are the only generated HTML allowed.
-    stripped = _MARKER.sub("", new).replace("<!-- page break -->", "")
-    if "<!--" in stripped or _RAW_HTML.search(stripped):
-        raise ValidationError("Raw HTML is not allowed in chapter edits")
+    # Existing OCR/extracted HTML must not make unrelated chapter cleanup fail.
+    # Only tokens already in the original revision may remain (or be removed).
+    if _raw_html_tokens(new) - _raw_html_tokens(old):
+        raise ValidationError("New raw HTML is not allowed in chapter edits")
     for link in _LINK.findall(new):
         url = link.strip()
         if not (
@@ -70,6 +115,42 @@ def validate_edit(old: str, new: str) -> None:
             or re.fullmatch(r"https?://[^\s<>]+", url)
         ):
             raise ValidationError("Use only this job's assets, page anchors or HTTP(S) links")
+
+
+def chapter_title_from_content(markdown: str, fallback: str) -> str:
+    """Use the first level-one heading, ignoring generated frontmatter."""
+    body = _FRONTMATTER.sub("", markdown, count=1)
+    # A heading inside a code fence is not the chapter title.
+    body = re.sub(r"^(?:```|~~~)[^\n]*\n.*?^(?:```|~~~)\s*$", "", body, flags=re.M | re.S)
+    match = re.search(r"^# (.+?)\s*$", body, re.M)
+    title = match.group(1).strip() if match else fallback
+    if not match:
+        meta = _FRONTMATTER.match(markdown)
+        stored = re.search(r"^title:\s*(.+)$", meta.group(0), re.M) if meta else None
+        if stored:
+            try:
+                value = json.loads(stored.group(1))
+                if isinstance(value, str):
+                    title = value
+            except ValueError:
+                pass
+    if not title or len(title) > 512 or any(c in title for c in "\r\n\x00"):
+        raise ValidationError("Chapter heading must be at most 512 characters")
+    return title
+
+
+def synchronize_title(markdown: str, title: str) -> str:
+    """Only the generated title scalar may change; leave page identity intact."""
+    match = _FRONTMATTER.match(markdown)
+    if not match:
+        return markdown  # Some older jobs have no frontmatter.
+    prefix = match.group(0)
+    if not re.search(r"^title:.*$", prefix, re.M):
+        return markdown
+    revised = re.sub(
+        r"^title:.*$", lambda _: f"title: {json.dumps(title)}", prefix, count=1, flags=re.M
+    )
+    return revised + markdown[len(prefix) :]
 
 
 def render_page(path: str, page_number: int) -> bytes:
@@ -257,7 +338,15 @@ class QualityReviewService:
             raise ConflictError("Only completed jobs can be edited")
         return job
 
-    async def _publish(self, job: Job, chapter: Chapter, updated: str) -> tuple[str, str]:
+    async def _publish(
+        self,
+        job: Job,
+        chapter: Chapter,
+        updated: str,
+        *,
+        title: str | None = None,
+        mermaid_count: int | None = None,
+    ) -> tuple[str, str]:
         if not job.output_path:
             raise ConflictError("Download archive is unavailable")
         member = f"{chapter.folder_name}/chapter.md"
@@ -273,7 +362,7 @@ class QualityReviewService:
                     )
                     await self.remote.download(job.output_path, source)
                     manifest = await asyncio.to_thread(
-                        self._updated_manifest, source, chapter, updated
+                        self._updated_manifest, source, chapter, updated, title, mermaid_count
                     )
                     await asyncio.to_thread(
                         write_revision, source, revised, member, updated, manifest
@@ -293,7 +382,12 @@ class QualityReviewService:
         new_zip = self.local.get_output_path(job.id, f".revisions/{version}/{job.id}.zip")
         try:
             manifest = await asyncio.to_thread(
-                self._updated_manifest, Path(job.output_path), chapter, updated
+                self._updated_manifest,
+                Path(job.output_path),
+                chapter,
+                updated,
+                title,
+                mermaid_count,
             )
             await self.local.save_output_text(job.id, f".revisions/{version}/{member}", updated)
             await asyncio.to_thread(
@@ -305,7 +399,13 @@ class QualityReviewService:
             raise
 
     @staticmethod
-    def _updated_manifest(source: Path, chapter: Chapter, updated: str) -> dict[str, Any]:
+    def _updated_manifest(
+        source: Path,
+        chapter: Chapter,
+        updated: str,
+        title: str | None = None,
+        mermaid_count: int | None = None,
+    ) -> dict[str, Any]:
         with zipfile.ZipFile(source) as archive:
             names = set(archive.namelist())
             for link in _LINK.findall(updated):
@@ -318,13 +418,27 @@ class QualityReviewService:
         if entry is None:
             raise ConflictError("Chapter is absent from the ZIP manifest")
         entry["word_count"] = len(updated.split())
+        if title is not None:
+            entry["title"] = title
+        if mermaid_count is not None:
+            entry["mermaid_count"] = mermaid_count
         return manifest
 
-    async def _save(self, job: Job, chapter: Chapter, updated: str) -> None:
-        new_md, new_zip = await self._publish(job, chapter, updated)
+    async def _save(
+        self, job: Job, chapter: Chapter, updated: str, *, direct: bool = False
+    ) -> None:
+        title = chapter_title_from_content(updated, chapter.title) if direct else None
+        mermaid_count = len(_MERMAID.findall(updated)) if direct else None
+        new_md, new_zip = await self._publish(
+            job, chapter, updated, title=title, mermaid_count=mermaid_count
+        )
         try:
             chapter.md_path, job.output_path = new_md, new_zip
             chapter.word_count = len(updated.split())
+            if title is not None:
+                chapter.title = title
+            if mermaid_count is not None:
+                chapter.mermaid_count = mermaid_count
             job.updated_at = utcnow()
             flags = (
                 await self.session.scalars(
@@ -366,24 +480,34 @@ class QualityReviewService:
             pass
 
     async def edit(
-        self, job_id: str, order: int, expected_hash: str, updated: str, actor_id: int
+        self,
+        job_id: str,
+        order: int,
+        expected_hash: str,
+        updated: str,
+        actor_id: int,
+        *,
+        direct: bool = False,
     ) -> dict[str, str]:
         job = await self._locked(job_id)
         chapter = next((c for c in job.chapters if c.order_index == order), None)
         if chapter is None or not chapter.md_path:
             raise NotFoundError("Chapter is unavailable")
-        await self._require_source(job, order)
+        if not direct:
+            await self._require_source(job, order)
         original = await self._text(job, chapter.md_path)
         if content_hash(original) != expected_hash:
             raise ConflictError("Chapter changed while you were editing; reload before saving")
-        validate_edit(original, updated)
+        validate_edit(original, updated, full_content=direct)
+        if direct:
+            updated = synchronize_title(updated, chapter_title_from_content(updated, chapter.title))
         if updated == original:
             return {"hash": expected_hash, "message": "No changes to save"}
         prior_path = chapter.md_path
         owner_id, backend = job.owner_id, job.storage_backend
         published: str | None = None
         try:
-            await self._save(job, chapter, updated)
+            await self._save(job, chapter, updated, direct=direct)
             published = job.output_path
             self.session.add(
                 ChapterEdit(
@@ -403,13 +527,20 @@ class QualityReviewService:
         return {"hash": content_hash(updated), "message": "Chapter saved"}
 
     async def undo(
-        self, job_id: str, order: int, expected_hash: str, actor_id: int
+        self,
+        job_id: str,
+        order: int,
+        expected_hash: str,
+        actor_id: int,
+        *,
+        direct: bool = False,
     ) -> dict[str, str]:
         job = await self._locked(job_id)
         chapter = next((c for c in job.chapters if c.order_index == order), None)
         if chapter is None or not chapter.md_path:
             raise NotFoundError("Chapter is unavailable")
-        await self._require_source(job, order)
+        if not direct:
+            await self._require_source(job, order)
         current = await self._text(job, chapter.md_path)
         if content_hash(current) != expected_hash:
             raise ConflictError("Chapter changed; reload before undoing")
@@ -429,7 +560,7 @@ class QualityReviewService:
         owner_id, backend = job.owner_id, job.storage_backend
         published = None
         try:
-            await self._save(job, chapter, previous)
+            await self._save(job, chapter, previous, direct=direct)
             published = job.output_path
             edit.undone_at, edit.undone_by_id = utcnow(), actor_id
             await self.session.commit()

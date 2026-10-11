@@ -29,7 +29,7 @@ export function useJobs() {
       setJobs(items);
       setConnection('online');
       setError(null);
-      if (!selectedRef.current) {
+      if (!selectedRef.current || !items.some(item => item.id === selectedRef.current)) {
         selectJob(items[0]?.id || '');
       }
     } catch (cause) {

@@ -29,6 +29,14 @@ class IJobRepository(ABC):
         """Update the job status plus any extra column values (page_count, error, …)."""
 
     @abstractmethod
+    async def claim(self, job_id: str) -> bool:
+        """Atomically claim an unclaimed, uncancelled queued job."""
+
+    @abstractmethod
+    async def finalize(self, job_id: str, status: JobStatus, **fields: Any) -> bool:
+        """Atomically finish only if RUNNING and not cancelled."""
+
+    @abstractmethod
     async def delete(self, job_id: str) -> bool:
         """Delete a job and its children. Returns False if it did not exist."""
 

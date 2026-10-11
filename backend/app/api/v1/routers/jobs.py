@@ -2,7 +2,7 @@
 
 import mimetypes
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -10,6 +10,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.storage.file_store import IFileStore
@@ -23,7 +24,7 @@ from app.api.deps import (
 from app.api.schemas import ChapterOut, JobDetailOut, JobOut
 from app.api.v1.routers.auth import check_owner, require_user
 from app.container import Container
-from app.db.models import User
+from app.db.models import ChapterEdit, Job, User
 from app.domain.enums import JobStatus
 from app.domain.exceptions import ConflictError, NotFoundError, StorageError
 from app.repositories.base import IJobRepository
@@ -191,6 +192,42 @@ async def download_job(
     return FileResponse(job.output_path, media_type="application/zip", filename=download_name)
 
 
+@router.post("/{job_id}/cancel", status_code=202)
+async def cancel_job(
+    job_id: str,
+    request: Request,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    container: Container = Depends(get_container),
+) -> dict[str, str]:
+    """Request worker-coordinated removal; never delete an active worker's files here."""
+    # A shared administrator can view jobs but cannot stop another person's job.
+    job = await container.job_repository(session).get(job_id)
+    if job is None or job.owner_id != user.id:
+        raise NotFoundError("Job not found")
+    await RateLimiter(container.redis, container.settings).costly(request, "review", user.id)
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            Job.owner_id == user.id,
+            Job.status.in_((JobStatus.QUEUED, JobStatus.RUNNING)),
+            Job.cancel_requested_at.is_(None),
+        )
+        .values(cancel_requested_at=datetime.now(UTC))
+        .returning(Job.id)
+    )
+    changed = result.scalar_one_or_none() is not None
+    await session.commit()
+    if not changed:
+        await session.refresh(job)
+        if job.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
+            raise ConflictError("Job has already finished; use Delete job instead")
+        if job.cancel_requested_at is None:
+            raise NotFoundError("Job not found")
+    return {"status": "stopping"}
+
+
 @router.delete("/{job_id}", status_code=204)
 async def delete_job(
     job_id: str,
@@ -355,6 +392,90 @@ async def source_page_image(
     )
 
 
+async def _chapter_edit_response(
+    job: Job,
+    order_index: int,
+    session: AsyncSession,
+    file_store: IFileStore,
+    container: Container,
+) -> dict[str, str | bool]:
+    if job.status not in _FINISHED_STATES:
+        raise ConflictError("Only completed jobs can be edited")
+    chapter = next((c for c in job.chapters if c.order_index == order_index), None)
+    if chapter is None or not chapter.md_path:
+        raise NotFoundError("Chapter is unavailable")
+    text = await quality_service(session, file_store, container)._text(job, chapter.md_path)
+    last_edit = await session.scalar(
+        select(ChapterEdit)
+        .where(
+            ChapterEdit.job_id == job.id,
+            ChapterEdit.chapter_order == order_index,
+            ChapterEdit.undone_at.is_(None),
+        )
+        .order_by(ChapterEdit.id.desc())
+        .limit(1)
+    )
+    digest_value = content_hash(text)
+    return {
+        "markdown": text,
+        "hash": digest_value,
+        "can_undo": bool(last_edit and last_edit.new_hash == digest_value),
+    }
+
+
+@router.get("/{job_id}/chapters/{order_index}/edit")
+async def get_chapter_for_edit(
+    job_id: str,
+    order_index: int,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> dict[str, str | bool]:
+    """Load the current revision without requiring a source-page map."""
+    job = check_owner(await job_repository.get(job_id), user)
+    return await _chapter_edit_response(job, order_index, session, file_store, container)
+
+
+@router.put("/{job_id}/chapters/{order_index}/edit")
+async def save_direct_chapter_edit(
+    job_id: str,
+    order_index: int,
+    body: ChapterEditIn,
+    request: Request,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> dict[str, str]:
+    check_owner(await job_repository.get(job_id), user)
+    await RateLimiter(container.redis, container.settings).costly(request, "review", user.id)
+    return await quality_service(session, file_store, container).edit(
+        job_id, order_index, body.expected_hash, body.markdown, user.id, direct=True
+    )
+
+
+@router.post("/{job_id}/chapters/{order_index}/edit/undo")
+async def undo_direct_chapter_edit(
+    job_id: str,
+    order_index: int,
+    body: UndoEditIn,
+    request: Request,
+    user: User = Depends(require_user),
+    job_repository: IJobRepository = Depends(get_job_repository),
+    session: AsyncSession = Depends(get_session),
+    file_store: IFileStore = Depends(get_file_store),
+    container: Container = Depends(get_container),
+) -> dict[str, str]:
+    check_owner(await job_repository.get(job_id), user)
+    await RateLimiter(container.redis, container.settings).costly(request, "review", user.id)
+    return await quality_service(session, file_store, container).undo(
+        job_id, order_index, body.expected_hash, user.id, direct=True
+    )
+
+
 @router.get("/{job_id}/quality/chapters/{order_index}")
 async def edit_source(
     job_id: str,
@@ -366,33 +487,7 @@ async def edit_source(
     container: Container = Depends(get_container),
 ) -> dict[str, str | bool]:
     job = check_owner(await job_repository.get(job_id), user)
-    if job.status not in _FINISHED_STATES:
-        raise ConflictError("Only completed jobs can be edited")
-    chapter = next((c for c in job.chapters if c.order_index == order_index), None)
-    if not chapter or not chapter.md_path:
-        raise NotFoundError("Chapter is unavailable")
-    service = quality_service(session, file_store, container)
-    text = await service._text(job, chapter.md_path)
-    digest_value = content_hash(text)
-    from sqlalchemy import select
-
-    from app.db.models import ChapterEdit
-
-    last_edit = await session.scalar(
-        select(ChapterEdit)
-        .where(
-            ChapterEdit.job_id == job_id,
-            ChapterEdit.chapter_order == order_index,
-            ChapterEdit.undone_at.is_(None),
-        )
-        .order_by(ChapterEdit.id.desc())
-        .limit(1)
-    )
-    return {
-        "markdown": text,
-        "hash": digest_value,
-        "can_undo": bool(last_edit and last_edit.new_hash == digest_value),
-    }
+    return await _chapter_edit_response(job, order_index, session, file_store, container)
 
 
 @router.put("/{job_id}/quality/chapters/{order_index}")

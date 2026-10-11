@@ -30,6 +30,7 @@ class ExtractImagesStage(BasePipelineStage):
         with pymupdf.open(ctx.upload_path) as document:
             for chapter in chapters:
                 for page_number in range(chapter.start_page, chapter.end_page + 1):
+                    await ctx.ensure_active()
                     page_blocks = await self._extractor.extract_page(
                         document, ctx.job_id, page_number
                     )

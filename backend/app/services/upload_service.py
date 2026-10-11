@@ -46,7 +46,17 @@ class UploadService:
         self._object_store = object_store
         self._logger = get_logger("UploadService")
 
-    async def accept_upload(self, file: UploadFile, *, owner_id: int = 1) -> Job:
+    @property
+    def max_upload_bytes(self) -> int:
+        return self._settings.max_upload_bytes
+
+    async def accept_upload(
+        self,
+        file: UploadFile,
+        *,
+        owner_id: int = 1,
+        source: tuple[str, str, str] | None = None,
+    ) -> Job:
         """Validate and store the upload, create the job row, enqueue the task.
 
         Raises:
@@ -93,8 +103,13 @@ class UploadService:
                 stored_path = await self._object_store.upload(stored_path, key)
                 await self._file_store.delete_job_files(job_id)
         except AppError:
-            # Never leave orphaned files behind on validation failure.
+            # Never leave orphaned files/objects behind on validation or upload failure.
             await self._file_store.delete_job_files(job_id)
+            if self._settings.storage_backend == "minio" and self._object_store:
+                try:
+                    await self._object_store.delete_prefix(f"{owner_id}/{job_id}/")
+                except AppError:
+                    self._logger.warning("upload_cleanup_failed", job_id=job_id)
             raise
 
         job = Job(
@@ -102,6 +117,10 @@ class UploadService:
             owner_id=owner_id,
             storage_backend=self._settings.storage_backend,
             filename=filename,
+            source_type="GITHUB" if source else "UPLOAD",
+            source_repo=source[0] if source else None,
+            source_path=source[1] if source else None,
+            source_revision=source[2] if source else None,
             stored_path=stored_path,
             status=JobStatus.QUEUED,
             page_count=page_count,

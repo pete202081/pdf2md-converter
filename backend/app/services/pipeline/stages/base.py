@@ -16,6 +16,7 @@ from app.domain.enums import StageStatus
 from app.domain.exceptions import AppError
 from app.domain.results import PipelineContext, StageResult
 from app.logging import get_logger
+from app.services.cancellation import JobCancellation
 from app.services.progress_service import ProgressService
 
 
@@ -34,6 +35,8 @@ class BasePipelineStage(ABC):
         self._logger.info("stage_started", job_id=ctx.job_id, stage=self.name)
         try:
             metrics = await self.execute(ctx)
+        except JobCancellation:
+            raise
         except AppError as exc:
             self._logger.error(
                 "stage_failed", job_id=ctx.job_id, stage=self.name, error=exc.message
@@ -75,4 +78,5 @@ class BasePipelineStage(ABC):
 
     async def report(self, ctx: PipelineContext, percent: int, message: str) -> None:
         """Convenience wrapper for progress reporting."""
+        await ctx.ensure_active()
         await self._progress.report(ctx.job_id, self.name, percent, message)

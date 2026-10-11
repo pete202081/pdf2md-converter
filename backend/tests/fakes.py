@@ -9,7 +9,7 @@ from typing import Any
 
 from app.adapters.ocr.base import IOcrEngine
 from app.adapters.vlm.base import IVlmProvider
-from app.db.models import Chapter, Job, JobStage, ProgressEvent
+from app.db.models import Chapter, Job, JobStage, ProgressEvent, utcnow
 from app.domain.enums import JobStatus, StageStatus
 from app.domain.exceptions import ProcessingError, ProviderError
 from app.repositories.base import (
@@ -80,6 +80,21 @@ class InMemoryJobRepository(IJobRepository):
         for key, value in fields.items():
             setattr(job, key, value)
         return job
+
+    async def claim(self, job_id: str) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None or job.status != JobStatus.QUEUED or job.cancel_requested_at is not None:
+            return False
+        job.status = JobStatus.RUNNING
+        job.started_at = utcnow()
+        return True
+
+    async def finalize(self, job_id: str, status: JobStatus, **fields: Any) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None or job.status != JobStatus.RUNNING or job.cancel_requested_at is not None:
+            return False
+        await self.update_status(job_id, status, **fields)
+        return True
 
     async def delete(self, job_id: str) -> bool:
         return self.jobs.pop(job_id, None) is not None

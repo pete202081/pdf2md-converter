@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowDownRight, ArrowUpRight, BookOpen, CircleHelp, ExternalLink, Leaf, Menu, X } from 'lucide-react';
-import { changePassword, deleteJob, getAuthSession, signOut } from './api/client';
+import { changePassword, deleteJob, stopJob, getAuthSession, signOut } from './api/client';
 import type { AuthSession } from './api/client';
 import AuthGate from './components/AuthGate';
 import type { Job } from './api/types';
@@ -9,6 +9,7 @@ import LibrarySearch from './components/LibrarySearch';
 import type { LibrarySearchHit } from './api/types';
 import JobWorkspace from './components/JobWorkspace';
 import UploadPanel from './components/UploadPanel';
+import GithubPDFPanel from './components/GithubPDFPanel';
 import SettingsPage from './components/SettingsPage';
 import ShelvesPage from './components/ShelvesPage';
 import { useJobs } from './hooks/useJobs';
@@ -42,11 +43,21 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   const { jobs, selectedId, selectJob, detail, error, setError, connection, loading,
     refreshJobs, refreshDetail } = useJobs();
   const [toast, setToast] = useState('');
+  const [editorDirty, setEditorDirty] = useState(false);
+  function confirmDiscard(): boolean {
+    return !editorDirty || window.confirm('Discard unsaved chapter changes?');
+  }
+  function selectWithGuard(id: string): boolean {
+    if (id !== selectedId && !confirmDiscard()) return false;
+    selectJob(id);
+    return true;
+  }
   const [searchTarget, setSearchTarget] = useState<{ hit: LibrarySearchHit; source: boolean; key: number } | null>(null);
   const [passwordPanel, setPasswordPanel] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [nextPassword, setNextPassword] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [sourceTab, setSourceTab] = useState<'upload' | 'github'>('upload');
   const [page, setPage] = useState<'workspace' | 'settings'>(() => window.location.hash === '#settings' ? 'settings' : 'workspace');
   useEffect(() => {
     const syncPage = () => setPage(window.location.hash === '#settings' ? 'settings' : 'workspace');
@@ -65,14 +76,25 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   const totalChapters = jobs.reduce((count, job) => count + job.chapter_count, 0);
 
   function onUploaded(job: Job) {
-    selectJob(job.id);
+    selectWithGuard(job.id);
     setToast(`${job.filename} was queued for conversion.`);
     window.setTimeout(() => setToast(''), 5000);
     void refreshJobs();
     void refreshDetail();
   }
 
+  async function onStop(id: string) {
+    if (!window.confirm('Stop this conversion and permanently remove the job, original PDF and all generated files? This cannot be undone.')) return;
+    try {
+      await stopJob(id);
+      setToast('Stop requested. The worker will finish its current operation, then remove the job and files.');
+      await refreshJobs();
+      await refreshDetail();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not stop conversion.'); }
+  }
+
   async function onDelete(id: string) {
+    if (editorDirty && !window.confirm('Discard unsaved chapter changes and delete this job?')) return;
     if (!window.confirm('Delete this job, its PDF, chapters and ZIP? This cannot be undone.')) return;
     try {
       await deleteJob(id);
@@ -86,20 +108,20 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     <header className="site-header">
       <a className="brand" href="/" aria-label="Folio home"><span className="brand-icon"><BookOpen size={21} strokeWidth={1.8} /></span><span className="brand-name">folio<span className="brand-period">.</span></span><span className="brand-divider" /><span className="brand-subtitle">PDF TO MARKDOWN STUDIO</span></a>
       <nav className={`top-nav ${menuOpen ? 'top-nav-open' : ''}`} aria-label="Main navigation">
-        <a href="#shelves" onClick={() => setMenuOpen(false)}>Bookshelves</a>
+        <a href="#shelves" onClick={event => { if (!confirmDiscard()) { event.preventDefault(); return; } setMenuOpen(false); }}>Bookshelves</a>
         <a className={page === 'workspace' ? 'nav-active' : ''} href="#workspace" onClick={() => { setPage('workspace'); setMenuOpen(false); }}>Workspace</a>
-        {auth.role === 'ADMIN' && <a className={page === 'settings' ? 'nav-active' : ''} href="#settings" onClick={() => { setPage('settings'); setMenuOpen(false); }}>Settings</a>}
+        {auth.role === 'ADMIN' && <a className={page === 'settings' ? 'nav-active' : ''} href="#settings" onClick={event => { if (!confirmDiscard()) { event.preventDefault(); return; } setPage('settings'); setMenuOpen(false); }}>Settings</a>}
         <a href="#how-it-works" onClick={() => setMenuOpen(false)}>How it works</a>
         <a href="/docs" target="_blank" rel="noopener noreferrer" onClick={() => setMenuOpen(false)}>API docs <ExternalLink size={12} /></a>
       </nav>
-      <div className="header-right"><span title="Signed-in account">{auth.username}</span><button className="secondary-button" type="button" onClick={() => setPasswordPanel(!passwordPanel)}>Change password</button><button className="secondary-button" type="button" onClick={onSignOut}>Sign out</button><span className={`system-status system-${connection}`}><span />{connection === 'online' ? 'SYSTEM ONLINE' : connection === 'offline' ? 'API OFFLINE' : 'CONNECTING'}</span>
+      <div className="header-right"><span title="Signed-in account">{auth.username}</span><button className="secondary-button" type="button" onClick={() => setPasswordPanel(!passwordPanel)}>Change password</button><button className="secondary-button" type="button" onClick={() => { if (confirmDiscard()) onSignOut(); }}>Sign out</button><span className={`system-status system-${connection}`}><span />{connection === 'online' ? 'SYSTEM ONLINE' : connection === 'offline' ? 'API OFFLINE' : 'CONNECTING'}</span>
         <button className="menu-toggle" aria-label={menuOpen ? 'Close menu' : 'Open menu'} type="button" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X size={20} /> : <Menu size={20} />}</button>
       </div>
     </header>
 
     <main id={page === 'workspace' ? 'workspace' : 'settings'} className="main-content">
       {passwordPanel && <form className="settings-card settings-auth" onSubmit={event => {
-        event.preventDefault(); void changePassword(currentPassword, nextPassword).then(() => { setPasswordPanel(false); onSignOut(); })
+        event.preventDefault(); if (!confirmDiscard()) return; void changePassword(currentPassword, nextPassword).then(() => { setPasswordPanel(false); onSignOut(); })
           .catch(cause => setError(cause instanceof Error ? cause.message : 'Could not change password.'));
       }}><h2>Change password</h2><label>Current password<input type="password" required autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} /></label>
         <label>New password (12+ characters)<input type="password" required minLength={12} autoComplete="new-password" value={nextPassword} onChange={event => setNextPassword(event.target.value)} /></label>
@@ -121,15 +143,15 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
       {toast && <div className="toast" role="status">✳ &nbsp;{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification"><X size={14} /></button></div>}
 
       <div className="dashboard-grid">
-        <div className="left-column"><UploadPanel onUploaded={onUploaded} /><LibrarySearch onOpen={(hit, source) => {
-          selectJob(hit.job_id);
+        <div className="left-column"><div className="source-tabs" role="group" aria-label="PDF source"><button type="button" className={sourceTab === 'upload' ? 'selected' : ''} onClick={() => setSourceTab('upload')}>Upload PDF</button><button type="button" className={sourceTab === 'github' ? 'selected' : ''} onClick={() => setSourceTab('github')}>Find on GitHub</button></div>{sourceTab === 'upload' ? <UploadPanel onUploaded={onUploaded} /> : <GithubPDFPanel admin={auth.role === 'ADMIN'} onConverted={onUploaded} />}<LibrarySearch onOpen={(hit, source) => {
+          if (!selectWithGuard(hit.job_id)) return;
           setSearchTarget({ hit, source, key: Date.now() });
           setPage('workspace');
           window.location.hash = '#workspace';
-        }} /><JobList jobs={jobs} selectedId={selectedId} loading={loading} onSelect={selectJob} /></div>
+        }} /><JobList jobs={jobs} selectedId={selectedId} loading={loading} onSelect={id => { selectWithGuard(id); }} /></div>
         <JobWorkspace job={selected} detail={detail?.id === selectedId ? detail : null} events={events}
-          searchTarget={searchTarget} streamState={streamState} onDelete={id => void onDelete(id)}
-          onRefresh={() => { void refreshJobs(); void refreshDetail(); }} />
+          searchTarget={searchTarget} streamState={streamState} onDelete={id => void onDelete(id)} onStop={id => void onStop(id)}
+          onDirtyChange={setEditorDirty} onRefresh={() => { void refreshJobs(); void refreshDetail(); }} />
       </div>
 
       <section id="how-it-works" className="how-section"><div className="how-left"><span className="section-kicker">THE PROCESS, SIMPLIFIED</span><h2>Good things happen<br/>in <em>three steps.</em></h2></div>

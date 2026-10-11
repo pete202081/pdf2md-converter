@@ -37,12 +37,17 @@ class JobOut(BaseModel):
 
     id: str
     filename: str
+    source_type: str = "UPLOAD"
+    source_repo: str | None = None
+    source_path: str | None = None
+    source_revision: str | None = None
     status: JobStatus
     page_count: int
     chapter_count: int
     created_at: datetime
     updated_at: datetime
     error: str | None = None
+    cancel_requested_at: datetime | None = None
     review_total: int = 0
     review_pending: int = 0
     search_index_state: str = "PENDING"

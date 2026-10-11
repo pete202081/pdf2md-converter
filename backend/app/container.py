@@ -6,6 +6,7 @@ build their dependencies from this single place, so there is exactly one wiring
 location in the codebase.
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import redis.asyncio as aioredis
@@ -94,7 +95,10 @@ class Container:
         )
 
     def build_orchestrator(
-        self, session: AsyncSession, upload_path_override: str | None = None
+        self,
+        session: AsyncSession,
+        upload_path_override: str | None = None,
+        cancellation_check: Callable[[], Awaitable[None]] | None = None,
     ) -> ConversionOrchestrator:
         """Assemble the conversion pipeline.
 
@@ -141,6 +145,7 @@ class Container:
             settings=self.settings,
             metrics_redis=self.redis,
             upload_path_override=upload_path_override,
+            cancellation_check=cancellation_check,
             search_indexer=SearchIndexService(session, self.file_store, self.object_store),
         )
 

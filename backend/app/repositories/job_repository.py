@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -52,6 +52,32 @@ class JobRepository(IJobRepository):
         await self._session.commit()
         await self._session.refresh(job)
         return job
+
+    async def claim(self, job_id: str) -> bool:
+        result = await self._session.execute(
+            update(Job)
+            .where(
+                Job.id == job_id, Job.status == JobStatus.QUEUED, Job.cancel_requested_at.is_(None)
+            )
+            .values(status=JobStatus.RUNNING, started_at=utcnow())
+            .returning(Job.id)
+        )
+        changed = result.scalar_one_or_none() is not None
+        await self._session.commit()
+        return changed
+
+    async def finalize(self, job_id: str, status: JobStatus, **fields: Any) -> bool:
+        result = await self._session.execute(
+            update(Job)
+            .where(
+                Job.id == job_id, Job.status == JobStatus.RUNNING, Job.cancel_requested_at.is_(None)
+            )
+            .values(status=status, **fields)
+            .returning(Job.id)
+        )
+        changed = result.scalar_one_or_none() is not None
+        await self._session.commit()
+        return changed
 
     async def delete(self, job_id: str) -> bool:
         job = await self.get(job_id)

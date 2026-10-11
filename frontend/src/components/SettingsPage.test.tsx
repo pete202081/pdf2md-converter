@@ -85,3 +85,24 @@ it('does not report an empty queue when loading account requests fails', async (
   await screen.findByText('reader@example.com');
   expect(screen.queryByRole('alert')).toBeNull();
 });
+
+it('stores the admin-managed GitHub token only on explicit save', async () => {
+  const fetcher = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/session')) return ok({ authenticated: true, setup_required: false, csrf_token: 'csrf-admin' });
+    if (url.endsWith('/settings') && init?.method === 'PUT') return ok({ ...config, keys_configured: { ...config.keys_configured, github_pat: true } });
+    if (url.endsWith('/settings')) return ok({ ...config, keys_configured: { ...config.keys_configured, github_pat: false } });
+    if (url.endsWith('/users')) return ok([]);
+    throw new Error(`Unexpected ${url}`);
+  });
+  vi.stubGlobal('fetch', fetcher);
+  render(<SettingsPage />);
+  await screen.findByLabelText('GitHub personal access token Not configured');
+  fireEvent.change(screen.getByLabelText('GitHub personal access token Not configured'), { target: { value: 'github-secret' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+  await waitFor(() => expect(fetcher.mock.calls.some(([url, init]) => url === '/api/v1/admin/settings' && init?.method === 'PUT')).toBe(true));
+  const save = fetcher.mock.calls.find(([url, init]) => url === '/api/v1/admin/settings' && init?.method === 'PUT');
+  expect(JSON.parse(save![1].body).github_pat).toBe('github-secret');
+  expect(save![1].headers['X-CSRF-Token']).toBe('csrf-admin');
+  await screen.findByLabelText('GitHub personal access token Configured');
+  expect(screen.queryByDisplayValue('github-secret')).not.toBeInTheDocument();
+});

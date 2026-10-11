@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     output_dir: str = "/data/outputs"
 
     settings_key_file: str = "/data/settings-keys/fernet.key"
+    github_pat: str = ""  # admin-managed, never returned to browser
 
     # Upload limits
     max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB

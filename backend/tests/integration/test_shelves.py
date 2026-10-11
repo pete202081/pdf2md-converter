@@ -439,3 +439,57 @@ async def test_failed_publish_commit_removes_snapshot_files(tmp_path: Path) -> N
         root = Path(store.get_output_root("shelves"))
         assert not root.exists() or not list(root.iterdir())
     await engine.dispose()
+
+
+def test_converted_snapshot_ignores_unreferenced_zip_members(tmp_path: Path) -> None:
+    """Generated conversion ZIPs contain non-reader files; only selected content matters."""
+    from app.services.shelves import prepare_conversion
+
+    archive = tmp_path / "large-source.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+        output.writestr("01_One/chapter.md", "# One\n![Cover](../assets/cover.png)")
+        output.writestr("assets/cover.png", b"\x89PNG\r\n\x1a\nimage")
+        # 801+ files and >200 MiB uncompressed, mostly unused intermediate images.
+        noise = b"x" * (1024 * 1024)
+        for index in range(201):
+            output.writestr(f"assets/unused_{index}.png", noise)
+        for index in range(601):
+            output.writestr(f"intermediate/page_{index}.txt", b"metadata")
+    job = Job(
+        id="source",
+        filename="Source.pdf",
+        owner_id=1,
+        stored_path="unused",
+        status=JobStatus.SUCCEEDED,
+        chapters=[Chapter(order_index=1, title="One", folder_name="01_One", md_path="unused")],
+    )
+    # Untrusted Markdown imports retain the 800-file / 200 MiB bounds.
+    with pytest.raises(ValidationError, match="Book archive exceeds shelf limits"):
+        prepare_archive(archive, tmp_path / "import", imported=True)
+    shelf = prepare_conversion(archive, job, tmp_path / "shelf")
+    assert len(shelf.chapters) == 1
+    assert shelf.assets == [("cover.png", "image/png")]
+    assert (tmp_path / "shelf" / "assets" / "cover.png").read_bytes().endswith(b"image")
+    assert not (tmp_path / "shelf" / "assets" / "unused_0.png").exists()
+
+
+def test_converted_snapshot_bounds_selected_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import shelves
+
+    archive = tmp_path / "small-source.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("01_One/chapter.md", "# One\n![Image](../assets/image.png)")
+        output.writestr("assets/image.png", b"\x89PNG\r\n\x1a\nimage")
+    job = Job(
+        id="source",
+        filename="Source.pdf",
+        owner_id=1,
+        stored_path="unused",
+        status=JobStatus.SUCCEEDED,
+        chapters=[Chapter(order_index=1, title="One", folder_name="01_One", md_path="unused")],
+    )
+    monkeypatch.setattr(shelves, "_MAX_SNAPSHOT_BYTES", 40)
+    with pytest.raises(ValidationError, match="Referenced book content exceeds"):
+        shelves.prepare_conversion(archive, job, tmp_path / "snapshot")

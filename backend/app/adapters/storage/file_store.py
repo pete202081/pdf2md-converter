@@ -136,6 +136,7 @@ class LocalFileStore(IFileStore):
         _validate_job_id(job_id)
         for root in (self._upload_root, self._output_root):
             target = self._resolve_under(root, job_id)
-            await asyncio.to_thread(shutil.rmtree, target, True)  # ignore_errors=True
+            if await asyncio.to_thread(target.exists):
+                await asyncio.to_thread(shutil.rmtree, target)
         archive = self._resolve_under(self._output_root, f"{job_id}.zip")
         await asyncio.to_thread(archive.unlink, True)  # missing_ok=True

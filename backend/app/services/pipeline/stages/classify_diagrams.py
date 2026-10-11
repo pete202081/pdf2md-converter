@@ -32,6 +32,7 @@ class ClassifyDiagramsStage(BasePipelineStage):
         candidates: list[int] = []
         cache: dict[str, bytes] = {}
         for index, block in enumerate(blocks):
+            await ctx.ensure_active()
             if block.kind != IMAGE or not block.image_path:
                 continue
             try:

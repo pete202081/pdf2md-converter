@@ -44,6 +44,10 @@ class Job(Base):
         String(16), nullable=False, default="local", server_default="local"
     )
     filename: Mapped[str] = mapped_column(String(512))
+    source_type: Mapped[str] = mapped_column(String(16), default="UPLOAD", server_default="UPLOAD")
+    source_repo: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    source_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     stored_path: Mapped[str] = mapped_column(Text)
     status: Mapped[JobStatus] = mapped_column(
         SAEnum(JobStatus, native_enum=False, length=16), default=JobStatus.QUEUED, index=True
@@ -58,6 +62,9 @@ class Job(Base):
     chapter_count: Mapped[int] = mapped_column(Integer, default=0)
     output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

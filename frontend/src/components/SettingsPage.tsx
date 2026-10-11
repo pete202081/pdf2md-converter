@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { AlertCircle, CheckCircle2, LockKeyhole, Save, Settings2, ShieldCheck } from 'lucide-react';
 
 type Provider = 'ollama' | 'openrouter' | 'openai' | 'anthropic';
-type Secret = 'openrouter_api_key' | 'openai_api_key' | 'anthropic_api_key';
+type Secret = 'openrouter_api_key' | 'openai_api_key' | 'anthropic_api_key' | 'github_pat';
 interface SessionState { authenticated: boolean; setup_required: boolean; csrf_token: string | null }
 interface Account { id: number; username: string; status: string; created_at: string }
 interface RuntimeSettings {
@@ -125,6 +125,14 @@ export default function SettingsPage() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Check failed.'); }
     finally { setBusy(false); }
   }
+  async function checkGithub() {
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const result = await call<{ reachable: boolean }>('/settings/github/check', { method: 'POST' }, auth?.csrf_token);
+      setMessage(result.reachable ? 'Saved GitHub token is valid.' : 'GitHub token check failed.');
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'GitHub token check failed.'); }
+    finally { setBusy(false); }
+  }
   function text(field: keyof RuntimeSettings, value: string | number) {
     setSettings(previous => previous ? { ...previous, [field]: value } : previous);
   }
@@ -183,6 +191,10 @@ export default function SettingsPage() {
           {provider.id === 'openrouter' && <><label>Site URL (optional)<input value={settings.openrouter_site_url} onChange={event => text('openrouter_site_url', event.target.value)} /></label><label>App name<input value={settings.openrouter_app_name} onChange={event => text('openrouter_app_name', event.target.value)} /></label></>}
           <button className="secondary-button" disabled={busy} type="button" onClick={() => void check(provider.id)}>Test saved configuration{provider.id !== 'ollama' ? ' (may incur a charge)' : ''}</button>
         </div>)}</div>
+        <div className="settings-card"><h2>GitHub PDF discovery</h2><p>One shared, read-only fine-grained PAT. Approved users can find public PDFs; only administrators can access private repositories granted to this token. Grant only intended repositories, with Contents (read), and set an expiry. PDFs are not indexed by GitHub Code Search, so search is best-effort repository discovery.</p>
+          <label>GitHub personal access token <span className="key-state">{settings.keys_configured.github_pat ? 'Configured' : 'Not configured'}</span><input type="password" autoComplete="off" placeholder={settings.keys_configured.github_pat ? 'Leave empty to keep saved token' : 'Paste read-only token'} value={keys.github_pat || ''} onChange={event => setKeys({ ...keys, github_pat: event.target.value || undefined })} /></label>
+          {settings.keys_configured.github_pat && <button className="clear-key" type="button" onClick={() => setKeys({ ...keys, github_pat: null })}>Clear GitHub token on save</button>}
+          <button className="secondary-button" type="button" disabled={busy || !settings.keys_configured.github_pat} onClick={() => void checkGithub()}>Test saved GitHub token</button></div>
         <div className="settings-card"><h2>Conversion limits</h2><p>New jobs only. PDF size is capped here at 50 MiB; nginx has its own 64 MiB multipart request limit.</p><div className="settings-limits"><label>Vision timeout (seconds)<input type="number" min={5} max={600} value={settings.vlm_timeout_seconds} onChange={event => text('vlm_timeout_seconds', Number(event.target.value))} /></label><label>Maximum pages<input type="number" min={1} max={10000} value={settings.max_pages} onChange={event => text('max_pages', Number(event.target.value))} /></label><label>Maximum PDF (MiB)<input type="number" min={1} max={50} value={settings.max_upload_bytes / 1048576} onChange={event => text('max_upload_bytes', Math.round(Number(event.target.value) * 1048576))} /></label></div></div>
         <div className="settings-actions"><span>Saved provider keys are encrypted and never shown again. Existing partial jobs are not rerun automatically.</span><button className="download-button" disabled={busy} type="submit"><Save size={16} /> Save settings</button></div>
       </form>}

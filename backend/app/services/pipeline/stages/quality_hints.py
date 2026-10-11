@@ -31,6 +31,7 @@ class QualityHintsStage(BasePipelineStage):
         )
         count = 0
         for page, warnings in sorted(hints.items()):
+            await ctx.ensure_active()
             chapter = next((c for c in chapters if c.start_page < page <= c.end_page + 1), None)
             if chapter is None:
                 continue

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import GithubPDFPanel from './GithubPDFPanel';
 import { setSessionCsrf } from '../api/client';
@@ -41,4 +41,29 @@ it('shows an admin-only private repository list and browse action', async () => 
   await screen.findByRole('button', { name: 'books/secret' });
   fireEvent.click(screen.getByRole('button', { name: 'books/secret' }));
   await screen.findByRole('heading', { name: /Private · books\/secret/ });
+});
+
+
+it('shows review immediately beside the clicked result instead of below the full results list', async () => {
+  const files = Array.from({ length: 18 }, (_, i) => ({ ...pdf, path: `chapter-${i + 1}.pdf`, sha: String(i).padStart(40, 'a') }));
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
+    if (url.startsWith('/api/v1/github/search')) return { ok: true, json: async () => ({
+      repositories: [{ repo: 'books/guide', files, incomplete: false }], page: 1, has_more: false, incomplete: false,
+    }) };
+    return { ok: false, status: 404, json: async () => ({}) };
+  }));
+  render(<GithubPDFPanel admin={false} onConverted={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText('Search repository topics'), { target: { value: 'guide' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  const buttons = await screen.findAllByRole('button', { name: /Review PDF/i });
+  const firstItem = buttons[0].closest('li')!;
+  const lastItem = buttons[17].closest('li')!;
+  fireEvent.click(buttons[0]);
+  expect(within(firstItem).getByRole('region', { name: 'Review chapter-1.pdf' })).toBeInTheDocument();
+  expect(within(firstItem).getByRole('button', { name: 'Convert selected PDF' })).toBeInTheDocument();
+  expect(within(lastItem).queryByRole('region')).not.toBeInTheDocument();
+  expect(document.activeElement).toBe(within(firstItem).getByRole('heading', { name: 'chapter-1.pdf' }));
+  fireEvent.click(buttons[17]);
+  expect(within(firstItem).queryByRole('region')).not.toBeInTheDocument();
+  expect(within(lastItem).getByRole('region', { name: 'Review chapter-18.pdf' })).toBeInTheDocument();
 });

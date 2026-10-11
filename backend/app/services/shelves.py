@@ -27,7 +27,11 @@ from app.logging import get_logger
 
 log = get_logger("shelves")
 _MAX_UPLOAD = 50 * 1024 * 1024
-_MAX_TOTAL = 200 * 1024 * 1024
+_MAX_TOTAL = 200 * 1024 * 1024  # uncompressed Markdown import cap
+_MAX_CONVERSION_ZIP = 2 * 1024 * 1024 * 1024  # trusted output, before opening/copying
+_MAX_CONVERSION_ENTRIES = 20_000  # central-directory entries, including unused files
+_MAX_SNAPSHOT_BYTES = 1024 * 1024 * 1024  # selected chapters and referenced assets only
+_MAX_SNAPSHOT_ASSETS = 5_000
 _MAX_CHAPTER = 2 * 1024 * 1024
 _MAX_ASSET = 8 * 1024 * 1024
 _SAFE_FILE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$")
@@ -61,8 +65,12 @@ def _label(value: Any, maximum: int, required: bool = False) -> str | None:
 
 def _archive(archive: zipfile.ZipFile, *, imported: bool) -> dict[str, zipfile.ZipInfo]:
     infos = archive.infolist()
-    if len(infos) > 800 or sum(i.file_size for i in infos) > _MAX_TOTAL:
-        raise ValidationError("Book archive exceeds shelf limits")
+    if imported:
+        # Keep the original, stricter bounds for user-supplied ZIP uploads.
+        if len(infos) > 800 or sum(i.file_size for i in infos) > _MAX_TOTAL:
+            raise ValidationError("Book archive exceeds shelf limits")
+    elif len(infos) > _MAX_CONVERSION_ENTRIES:
+        raise ValidationError("Conversion ZIP contains too many files for a shelf snapshot")
     names: dict[str, zipfile.ZipInfo] = {}
     for info in infos:
         name = info.filename
@@ -196,23 +204,42 @@ def prepare_conversion(path: Path, job: Job, directory: Path) -> PreparedShelf:
             names = _archive(archive, imported=False)
             chapters: list[tuple[str, str]] = []
             images: dict[str, str] = {}
+            selected_bytes = 0
             if not 1 <= len(job.chapters) <= 100:
                 raise ValidationError("Conversion has no chapters or exceeds shelf limits")
             for order, chapter in enumerate(sorted(job.chapters, key=lambda c: c.order_index), 1):
                 source = f"{chapter.folder_name}/chapter.md"
                 if not _SAFE_FILE.fullmatch(chapter.folder_name):
                     raise ValidationError("Converted chapter folder is invalid")
+                info = names.get(source.casefold())
+                if info is not None:
+                    selected_bytes += info.file_size
+                if selected_bytes > _MAX_SNAPSHOT_BYTES:
+                    raise ValidationError(
+                        "Referenced book content exceeds the shelf snapshot limit"
+                    )
                 raw = _member(archive, names, source, _MAX_CHAPTER).decode("utf-8")
                 target = f"chapters/{order}.md"
                 images.update(_markdown(raw, names, directory / target))
+                if len(images) > _MAX_SNAPSHOT_ASSETS:
+                    raise ValidationError(
+                        "Conversion references too many images for a shelf snapshot"
+                    )
                 title = _label(chapter.title, 200, required=True)
                 assert title
                 chapters.append((title, target))
             for name in images:
+                asset_path = f"assets/{name}"
+                info = names.get(asset_path.casefold())
+                if info is not None:
+                    selected_bytes += info.file_size
+                if selected_bytes > _MAX_SNAPSHOT_BYTES:
+                    raise ValidationError(
+                        "Referenced book content exceeds the shelf snapshot limit"
+                    )
+                data = _member(archive, names, asset_path, _MAX_ASSET)
                 (directory / "assets").mkdir(exist_ok=True)
-                (directory / "assets" / name).write_bytes(
-                    _member(archive, names, f"assets/{name}", _MAX_ASSET)
-                )
+                (directory / "assets" / name).write_bytes(data)
             return PreparedShelf(
                 Path(job.filename).stem[:200], None, None, chapters, list(images.items())
             )
@@ -343,6 +370,8 @@ class ShelfPublisher:
             if job.storage_backend == "minio":
                 if not self.storage.remote:
                     raise StorageError("MinIO storage is not configured")
+                if await self.storage.remote.size(job.output_path) > _MAX_CONVERSION_ZIP:
+                    raise ValidationError("Conversion ZIP exceeds the 2 GiB shelf snapshot limit")
                 await self.storage.remote.download(job.output_path, archive)
             else:
                 source = Path(job.output_path).resolve()
@@ -350,9 +379,15 @@ class ShelfPublisher:
                 initial_zip = output_root.parent / f"{job_id}.zip"
                 if source != initial_zip and output_root not in source.parents:
                     raise NotFoundError("Conversion ZIP is unavailable")
+                try:
+                    source_bytes = (await asyncio.to_thread(source.stat)).st_size
+                except FileNotFoundError as exc:
+                    raise NotFoundError("Conversion ZIP is unavailable") from exc
+                if source_bytes > _MAX_CONVERSION_ZIP:
+                    raise ValidationError("Conversion ZIP exceeds the 2 GiB shelf snapshot limit")
                 await asyncio.to_thread(shutil.copyfile, source, archive)
-            if archive.stat().st_size > _MAX_TOTAL:
-                raise ValidationError("Conversion ZIP exceeds shelf limits")
+            if archive.stat().st_size > _MAX_CONVERSION_ZIP:
+                raise ValidationError("Conversion ZIP exceeds the 2 GiB shelf snapshot limit")
             prepared = await asyncio.to_thread(
                 prepare_conversion, archive, job, Path(temp) / "shelf"
             )

@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.github_pdf import GitHubPDF
 from app.adapters.vlm.http_providers import (
     AnthropicVisionProvider,
     OpenAiVisionProvider,
@@ -28,6 +29,7 @@ from app.api.v1.routers.auth import (
 from app.api.v1.routers.auth import (
     login as user_login,
 )
+from app.api.v1.routers.github import get_github
 from app.config import Settings
 from app.container import Container
 from app.db.models import BootstrapCode, User, UserSession
@@ -66,6 +68,7 @@ class SettingsUpdate(BaseModel):
     openrouter_api_key: str | None = None
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    github_pat: str | None = None
 
 
 @router.get("/session")
@@ -164,7 +167,7 @@ async def update_settings(
     provided = body.model_dump(exclude_unset=True)
     keys: dict[str, str | None] = {
         k: provided.pop(k)
-        for k in ("openrouter_api_key", "openai_api_key", "anthropic_api_key")
+        for k in ("openrouter_api_key", "openai_api_key", "anthropic_api_key", "github_pat")
         if k in provided
     }
     if any(value is None for value in provided.values()):
@@ -328,3 +331,14 @@ async def issue_reset_code(
     await session.commit()
     # Display once to the admin to share via a trusted channel; never log or email it.
     return {"code": code, "expires_in": "15 minutes"}
+
+
+@router.post("/settings/github/check")
+async def check_github_token(
+    request: Request,
+    admin: User = Depends(require_admin),
+    container: Container = Depends(get_container),
+    github: GitHubPDF = Depends(get_github),
+) -> dict[str, bool]:
+    await RateLimiter(container.redis, container.settings).costly(request, "provider", admin.id)
+    return {"reachable": await github.check()}

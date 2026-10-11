@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, deleteJob, getChapterMarkdown, getJob, listJobs, resolveAssetUrl, uploadJob, validatePdf } from './client';
+import { ApiError, deleteJob, stopJob, setSessionCsrf, getChapterMarkdown, getJob, listJobs, resolveAssetUrl, uploadJob, validatePdf } from './client';
 
 const fakeResponse = (status: number, body: unknown, contentType = 'json') => ({
   ok: status >= 200 && status < 300,
@@ -42,6 +42,17 @@ describe('API client', () => {
     expect(await getChapterMarkdown('job-1', 2)).toBe('# Hello');
     await expect(deleteJob('job-1')).resolves.toBeUndefined();
     expect(fetchMock.mock.calls[1][1].method).toBe('DELETE');
+  });
+
+  it('requests Stop with CSRF and does not issue DELETE', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse(202, { status: 'stopping' }));
+    vi.stubGlobal('fetch', fetchMock);
+    setSessionCsrf('test-csrf');
+    expect(await stopJob('j1')).toEqual({ status: 'stopping' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/jobs/j1/cancel', expect.objectContaining({
+      method: 'POST', headers: expect.objectContaining({ 'X-CSRF-Token': 'test-csrf' }),
+    }));
+    setSessionCsrf(null);
   });
 
   it('limits asset URLs to generated filenames for this job', () => {

@@ -33,6 +33,7 @@ class ExtractTextStage(BasePipelineStage):
             body_size = await asyncio.to_thread(estimate_body_size, document)
             for chapter in chapters:
                 for page_number in range(chapter.start_page, chapter.end_page + 1):
+                    await ctx.ensure_active()
                     page_blocks = await asyncio.to_thread(
                         self._extractor.extract_page, document, page_number, body_size
                     )

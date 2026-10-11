@@ -4,12 +4,17 @@ export type StageStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIP
 export interface Job {
   id: string;
   filename: string;
+  source_type?: 'UPLOAD' | 'GITHUB';
+  source_repo?: string | null;
+  source_path?: string | null;
+  source_revision?: string | null;
   status: JobStatus;
   page_count: number;
   chapter_count: number;
   created_at: string;
   updated_at: string;
   error: string | null;
+  cancel_requested_at?: string | null;
   review_total?: number;
   review_pending?: number;
   search_index_state?: 'PENDING' | 'READY' | 'ERROR';
@@ -107,3 +112,7 @@ export interface ReadingProgress {
   last_chapter_id: number | null; completed_chapter_ids: number[];
   resume_chapter_id: number | null; all_complete: boolean;
 }
+
+export interface GithubPDF { repo: string; path: string; sha: string; revision: string; size: number | null; url: string }
+export interface GithubSearch { repositories: { repo: string; files: GithubPDF[]; incomplete: boolean }[]; page: number; incomplete: boolean; has_more: boolean }
+export interface GithubBrowse { repo: string; private: boolean; directory: string; revision: string; files: GithubPDF[]; folders: string[]; incomplete: boolean }

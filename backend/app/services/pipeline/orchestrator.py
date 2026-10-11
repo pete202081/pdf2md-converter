@@ -8,6 +8,7 @@ Responsibilities:
 - sync whitelisted context values (page_count, chapter_count, output_path) back onto the job
 """
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from redis.asyncio import Redis
@@ -20,11 +21,16 @@ from app.domain.exceptions import NotFoundError
 from app.domain.results import PipelineContext, StageResult
 from app.logging import get_logger
 from app.repositories.base import IJobRepository, IStageRepository
+from app.services.cancellation import JobCancellation
 from app.services.library_search import SearchIndexService
 from app.services.pipeline.stages.base import BasePipelineStage
 
 # Context keys that are mirrored onto the job row after each stage.
 _SYNCED_JOB_FIELDS = ("page_count", "chapter_count", "output_path")
+
+
+class JobAlreadyClaimed(Exception):
+    """A duplicate task delivery found a worker already running this job."""
 
 
 class ConversionOrchestrator:
@@ -40,6 +46,7 @@ class ConversionOrchestrator:
         metrics_redis: Redis | None = None,
         upload_path_override: str | None = None,
         search_indexer: SearchIndexService | None = None,
+        cancellation_check: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._stages = list(stages)
         self._job_repository = job_repository
@@ -49,25 +56,34 @@ class ConversionOrchestrator:
         self._metrics_redis = metrics_redis
         self._upload_path_override = upload_path_override
         self._search_indexer = search_indexer
+        self._cancellation_check = cancellation_check
         self._logger = get_logger("ConversionOrchestrator")
 
-    async def run(self, job_id: str) -> JobStatus:
+    async def run(self, job_id: str, *, claimed: bool = False) -> JobStatus:
         """Execute all stages for ``job_id`` and return the final job status."""
         job = await self._job_repository.get(job_id)
         if job is None:
             raise NotFoundError(f"Job '{job_id}' not found")
 
-        await self._job_repository.update_status(job_id, JobStatus.RUNNING, started_at=utcnow())
+        if self._cancellation_check is not None:
+            await self._cancellation_check()
+        if not claimed and not await self._job_repository.claim(job_id):
+            # A second delivery must never compete with the owning worker.
+            if self._cancellation_check is not None:
+                await self._cancellation_check()
+            raise JobAlreadyClaimed()
 
         ctx = PipelineContext(
             job_id=job_id,
             upload_path=self._upload_path_override or job.stored_path,
             output_dir=self._file_store.get_output_root(job_id),
             settings=self._settings,
+            cancellation_check=self._cancellation_check,
         )
 
         failed_stage: str | None = None
         for stage in self._stages:
+            await ctx.ensure_active()
             stage_row = await self._stage_repository.create(
                 job_id=job_id, stage_name=stage.name, status=StageStatus.PENDING
             )
@@ -76,6 +92,7 @@ class ConversionOrchestrator:
             )
 
             result = await stage.run(ctx)
+            await ctx.ensure_active()
             await self._record_stage_metric(stage.name, result)
 
             await self._stage_repository.mark(
@@ -104,7 +121,8 @@ class ConversionOrchestrator:
             if ctx.data.get("partial")
             else JobStatus.SUCCEEDED
         )
-        await self._job_repository.update_status(
+        await ctx.ensure_active()
+        if not await self._job_repository.finalize(
             job_id,
             final_status,
             finished_at=utcnow(),
@@ -115,7 +133,8 @@ class ConversionOrchestrator:
                 if final_status == JobStatus.PARTIAL
                 else None
             ),
-        )
+        ):
+            raise JobCancellation()
         if final_status in (JobStatus.SUCCEEDED, JobStatus.PARTIAL) and self._search_indexer:
             try:
                 await self._search_indexer.index_job(job_id)

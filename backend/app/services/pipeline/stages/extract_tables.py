@@ -29,17 +29,17 @@ class ExtractTablesStage(BasePipelineStage):
         chapters: list[ChapterInfo] = ctx.data.get("chapters") or []
         blocks: list[ContentBlock] = list(ctx.data.get("blocks") or [])
 
-        def _extract_all() -> list[ContentBlock]:
-            found: list[ContentBlock] = []
-            with pdfplumber.open(ctx.upload_path) as pdf:
-                for chapter in chapters:
-                    for page_number in range(chapter.start_page, chapter.end_page + 1):
-                        found.extend(
-                            self._extractor.extract_page(pdf.pages[page_number], page_number)
+        found: list[ContentBlock] = []
+        with pdfplumber.open(ctx.upload_path) as pdf:
+            for chapter in chapters:
+                for page_number in range(chapter.start_page, chapter.end_page + 1):
+                    await ctx.ensure_active()
+                    found.extend(
+                        await asyncio.to_thread(
+                            self._extractor.extract_page, pdf.pages[page_number], page_number
                         )
-            return found
-
-        found = await asyncio.to_thread(_extract_all)
+                    )
+        await ctx.ensure_active()
         tables_by_page: dict[int, list[ContentBlock]] = {}
         for table in found:
             tables_by_page.setdefault(table.page, []).append(table)

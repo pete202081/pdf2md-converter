@@ -15,6 +15,7 @@ from app.adapters.storage.file_store import IFileStore
 from app.adapters.vlm.base import IVlmProvider
 from app.domain.exceptions import ProviderError
 from app.domain.results import PipelineContext
+from app.services.cancellation import JobCancellation
 from app.services.diagram_classifier import prepare_vision_image
 from app.services.mermaid_validation import validate_mermaid
 from app.services.pipeline.blocks import MERMAID, ContentBlock
@@ -41,6 +42,7 @@ class ConvertMermaidStage(BasePipelineStage):
         failures: dict[str, str] = {}
         converted = 0
         fallback = 0
+        provider_disabled = False
         review_items: list[dict[str, str | int | float]] = []
 
         def keep_original(block: ContentBlock, reason: str) -> None:
@@ -59,8 +61,12 @@ class ConvertMermaidStage(BasePipelineStage):
             )
 
         for number, index in enumerate(candidates, start=1):
+            await ctx.ensure_active()
             block = blocks[index]
             try:
+                if provider_disabled:
+                    keep_original(block, "vision_unavailable")
+                    continue
                 if block.image_path in failures:
                     keep_original(block, failures[block.image_path])
                     continue
@@ -81,6 +87,8 @@ class ConvertMermaidStage(BasePipelineStage):
                     bbox=block.bbox,
                 )
                 converted += 1
+            except JobCancellation:
+                raise
             except Exception as exc:
                 # Preserve the original IMAGE block and record a safe reason category.
                 reason = (
@@ -88,11 +96,24 @@ class ConvertMermaidStage(BasePipelineStage):
                     if isinstance(exc, ProviderError)
                     else "asset_error"
                 )
+                if isinstance(exc, ProviderError):
+                    provider_disabled = True
+                    self._logger.warning(
+                        "diagram_vision_disabled",
+                        job_id=ctx.job_id,
+                        page=block.page,
+                        error=str(exc),
+                        remaining=len(candidates) - number,
+                    )
+                else:
+                    self._logger.warning(
+                        "diagram_asset_conversion_failed",
+                        job_id=ctx.job_id,
+                        page=block.page,
+                        error=str(exc),
+                    )
                 failures[block.image_path] = reason
                 keep_original(block, reason)
-                self._logger.exception(
-                    "diagram_conversion_failed", job_id=ctx.job_id, page=block.page
-                )
             if number == len(candidates) or number % 5 == 0:
                 await self.report(
                     ctx,
@@ -107,4 +128,9 @@ class ConvertMermaidStage(BasePipelineStage):
         await self.report(
             ctx, 82, f"Converted {converted} diagram(s); retained {fallback} original(s)"
         )
-        return {"candidates": len(candidates), "converted": converted, "fallback": fallback}
+        return {
+            "candidates": len(candidates),
+            "converted": converted,
+            "fallback": fallback,
+            "vision_disabled": provider_disabled,
+        }

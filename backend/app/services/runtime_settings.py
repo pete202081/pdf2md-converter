@@ -30,7 +30,7 @@ FIELDS = frozenset(
         "max_upload_bytes",
     }
 )
-KEYS = frozenset({"openrouter_api_key", "openai_api_key", "anthropic_api_key"})
+KEYS = frozenset({"openrouter_api_key", "openai_api_key", "anthropic_api_key", "github_pat"})
 
 
 def _cipher(path: str) -> Fernet:

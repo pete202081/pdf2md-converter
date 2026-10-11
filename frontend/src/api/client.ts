@@ -1,4 +1,4 @@
-import type { ApiErrorBody, DiagramReviewItem, EditableChapter, Job, JobDetail, QualitySummary, LibrarySearchResponse, ShelfBook, ShelfBookDetail, ReadingProgress } from './types';
+import type { ApiErrorBody, DiagramReviewItem, EditableChapter, Job, JobDetail, QualitySummary, LibrarySearchResponse, ShelfBook, ShelfBookDetail, ReadingProgress, GithubPDF, GithubSearch, GithubBrowse } from './types';
 
 export const JOBS_URL = '/api/v1/jobs';
 let csrfToken: string | null = null;
@@ -96,6 +96,20 @@ export async function getChapterMarkdown(jobId: string, order: number, signal?: 
   return response.text();
 }
 
+export function getChapterForEdit(jobId: string, order: number): Promise<EditableChapter> {
+  return request<EditableChapter>(`${JOBS_URL}/${encodeURIComponent(jobId)}/chapters/${order}/edit`);
+}
+export function saveChapterEdit(jobId: string, order: number, expected_hash: string, markdown: string): Promise<{ hash: string; message: string }> {
+  return request(`${JOBS_URL}/${encodeURIComponent(jobId)}/chapters/${order}/edit`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_hash, markdown }),
+  });
+}
+export function undoChapterEdit(jobId: string, order: number, expected_hash: string): Promise<{ hash: string; message: string }> {
+  return request(`${JOBS_URL}/${encodeURIComponent(jobId)}/chapters/${order}/edit/undo`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_hash }),
+  });
+}
+
 export function getQualitySummary(jobId: string): Promise<QualitySummary> {
   return request<QualitySummary>(`${JOBS_URL}/${encodeURIComponent(jobId)}/quality`);
 }
@@ -117,6 +131,10 @@ export function undoQualityChapter(jobId: string, order: number, expected_hash: 
   return request(`${JOBS_URL}/${encodeURIComponent(jobId)}/quality/chapters/${order}/undo`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_hash }),
   });
+}
+
+export function stopJob(jobId: string): Promise<{ status: string }> {
+  return request(`${JOBS_URL}/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
 }
 
 export function deleteJob(jobId: string): Promise<void> {
@@ -246,4 +264,19 @@ export function saveReadProgress(id: string, chapter_id: number, completed?: boo
 }
 export function resetReadProgress(id: string): Promise<void> {
   return request(`${SHELVES}/reading/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function githubSearch(query: string, page = 1): Promise<GithubSearch> {
+  return request(`/api/v1/github/search?query=${encodeURIComponent(query)}&page=${page}`);
+}
+export function githubBrowse(repo: string, directory = ''): Promise<GithubBrowse> {
+  return request('/api/v1/github/browse', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo, directory }) });
+}
+export function githubPrivateRepositories(page = 1): Promise<{ repo: string; private: boolean }[]> {
+  return request(`/api/v1/github/private-repositories?page=${page}`);
+}
+export function githubConvert(file: GithubPDF): Promise<Job> {
+  return request('/api/v1/github/convert', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo: file.repo, path: file.path, revision: file.revision, sha: file.sha }) });
 }

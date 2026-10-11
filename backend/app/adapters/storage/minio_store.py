@@ -68,6 +68,15 @@ class MinioObjectStore:
             raise StorageError("Could not publish object") from exc
         return self.uri(key)
 
+    async def size(self, uri: str) -> int:
+        """Inspect an object before copying a potentially large conversion archive."""
+        key = self.parse(uri)
+        try:
+            metadata = await asyncio.to_thread(self.client.head_object, Bucket=self.bucket, Key=key)
+            return int(metadata["ContentLength"])
+        except Exception as exc:
+            raise StorageError("Could not inspect conversion object") from exc
+
     async def download(self, uri: str, local_path: str | Path) -> None:
         key = self.parse(uri)
         path = Path(local_path)
@@ -138,10 +147,12 @@ class MinioObjectStore:
             for page in pages:
                 objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
                 for i in range(0, len(objects), 1000):
-                    await asyncio.to_thread(
+                    result = await asyncio.to_thread(
                         self.client.delete_objects,
                         Bucket=self.bucket,
                         Delete={"Objects": objects[i : i + 1000], "Quiet": True},
                     )
+                    if result.get("Errors"):
+                        raise StorageError("Could not delete all objects")
         except Exception as exc:
             raise StorageError("Could not delete objects") from exc

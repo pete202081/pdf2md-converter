@@ -5,14 +5,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import fakeredis.aioredis
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app.adapters.github_pdf import GitHubPDF
 from app.adapters.vlm.factory import build_vlm_provider
 from app.api.deps import get_container, get_session
 from app.api.v1.routers.admin import digest
+from app.api.v1.routers.github import get_github
 from app.config import Settings
 from app.db.models import Base, BootstrapCode, RuntimeSetting, User, utcnow
 from app.main import create_app
@@ -68,6 +71,7 @@ async def test_setup_signin_and_runtime_settings(tmp_path: Path) -> None:
             payload = {
                 "vlm_provider": "openrouter",
                 "openrouter_api_key": "private-secret",
+                "github_pat": "github-secret",
                 "openrouter_vision_model": "openai/gpt-4o-mini",
                 "max_pages": 500,
             }
@@ -76,12 +80,28 @@ async def test_setup_signin_and_runtime_settings(tmp_path: Path) -> None:
             )
             assert saved.status_code == 200, saved.text
             assert saved.json()["keys_configured"]["openrouter_api_key"] is True
-            assert "private-secret" not in saved.text
+            assert "private-secret" not in saved.text and "github-secret" not in saved.text
+            assert saved.json()["keys_configured"]["github_pat"] is True
+            github_row = await session.get(RuntimeSetting, "github_pat")
+            assert github_row and "github-secret" not in github_row.value
             assert settings.openrouter_api_key == ""
             row = await session.get(RuntimeSetting, "openrouter_api_key")
             assert row is not None and row.value != "private-secret"
             resolved = await RuntimeSettingsService(session, settings).resolve()
             assert resolved.openrouter_api_key == "private-secret"
+            assert resolved.github_pat == "github-secret"
+            app.dependency_overrides[get_github] = lambda: GitHubPDF(
+                "github-secret",
+                transport=httpx.MockTransport(
+                    lambda req: httpx.Response(200, json={"login": "editor"})
+                ),
+            )
+            assert (await client.post("/api/v1/admin/settings/github/check")).status_code == 403
+            checked = await client.post(
+                "/api/v1/admin/settings/github/check", headers={"X-CSRF-Token": csrf}
+            )
+            assert checked.json() == {"reachable": True}
+            assert "github-secret" not in checked.text
             assert resolved.vlm_provider == "openrouter"
             assert resolved.max_pages == 500
             assert build_vlm_provider(resolved)._providers[0][0] == "openrouter"  # type: ignore[attr-defined]
